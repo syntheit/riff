@@ -5,8 +5,8 @@ const SETTINGS: &str = "dev.diegovsky.Riff";
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FeatureFlag {
     /*
-    Selection mode allows users to select multiple songs to queue, save, or remove.
-    It has visually bugged buttons in the page's header across all pages that use it.
+    Selection mode lets users select multiple songs to queue, save, remove, or
+    add to a playlist. Enabled by default; can be turned off in Settings.
     */
     SelectMode,
     /*

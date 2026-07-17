@@ -37,7 +37,7 @@ mod imp {
         pub cancel: TemplateChild<gtk::Button>,
 
         #[template_child]
-        pub overlay: TemplateChild<gtk::Overlay>,
+        pub stack: TemplateChild<gtk::Stack>,
     }
 
     #[glib::object_subclass]
@@ -130,15 +130,16 @@ impl HeaderBarWidget {
     }
 
     pub fn set_selection_active(&self, active: bool) {
+        // The Stack shows exactly one header at a time; `selection_title` is
+        // always visible within `selection_header`, so its visibility needs no
+        // separate toggling here — only the count needs resetting on entry.
+        let imp = self.imp();
         if active {
-            self.imp()
-                .selection_title
+            imp.selection_title
                 .set_title(&labels::n_songs_selected_label(0));
-            self.imp().selection_title.set_visible(true);
-            self.imp().selection_header.set_visible(true);
+            imp.stack.set_visible_child(&*imp.selection_header);
         } else {
-            self.imp().selection_title.set_visible(false);
-            self.imp().selection_header.set_visible(false);
+            imp.stack.set_visible_child(&*imp.main_header);
         }
     }
 

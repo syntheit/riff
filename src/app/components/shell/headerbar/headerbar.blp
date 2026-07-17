@@ -3,7 +3,7 @@ using Adw 1;
 
 template $HeaderBarWidget : Adw.Bin {
   [root]
-  Overlay overlay {
+  Stack stack {
     hexpand: true;
 
     Adw.HeaderBar main_header {
@@ -34,15 +34,9 @@ template $HeaderBarWidget : Adw.Bin {
       }
     }
 
-    [overlay]
     Adw.HeaderBar selection_header {
       show-end-title-buttons: false;
       show-start-title-buttons: false;
-      visible: false;
-
-      styles [
-        "selection-mode",
-      ]
 
       Button cancel {
         receives-default: true;

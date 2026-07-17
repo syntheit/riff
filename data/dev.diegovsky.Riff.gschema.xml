@@ -205,7 +205,7 @@
       <default>'none'</default>
     </key>
     <key name="feature-select-mode" type="b">
-      <default>false</default>
+      <default>true</default>
       <summary>Enable selection mode to select multiple songs for queuing, saving, or removing</summary>
     </key>
     <key name="feature-create-new-playlist" type="b">

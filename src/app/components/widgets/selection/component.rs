@@ -207,7 +207,7 @@ impl SelectionToolbar {
                 self.widget.set_move(SelectionToolState::Hidden);
                 self.widget
                     .set_queue(SelectionToolState::Visible(count > 0));
-                self.widget.set_add(SelectionToolState::Hidden);
+                self.widget.set_add(SelectionToolState::Visible(count > 0));
                 self.widget.set_remove(SelectionToolState::Hidden);
                 self.widget.set_save(SelectionToolState::Hidden);
             }
@@ -215,7 +215,7 @@ impl SelectionToolbar {
                 self.widget.set_move(SelectionToolState::Hidden);
                 self.widget
                     .set_queue(SelectionToolState::Visible(count > 0));
-                self.widget.set_add(SelectionToolState::Hidden);
+                self.widget.set_add(SelectionToolState::Visible(count > 0));
                 self.widget
                     .set_remove(SelectionToolState::Visible(count > 0));
                 self.widget.set_save(SelectionToolState::Hidden);
