@@ -180,6 +180,7 @@ impl PlaybackWidget {
         let widget = self.imp();
         let f_clone = f.clone();
         widget.now_playing.connect_clicked(move |_| f_clone());
+        widget.mobile_now_playing.connect_clicked(move || f());
     }
 
     pub fn connect_seek<Seek>(&self, seek: Seek)

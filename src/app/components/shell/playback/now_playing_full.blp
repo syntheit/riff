@@ -1,0 +1,129 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $NowPlayingFullWidget : Adw.Bin {
+  Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      show-title: false;
+
+      Button close_button {
+        icon-name: "go-down-symbolic";
+        tooltip-text: _("Close");
+        focus-on-click: false;
+        can-focus: false;
+      }
+    }
+
+    content: Adw.Clamp {
+      maximum-size: 480;
+
+      Box {
+        orientation: vertical;
+        valign: center;
+        spacing: 18;
+        margin-start: 24;
+        margin-end: 24;
+        margin-top: 12;
+        margin-bottom: 24;
+
+        Picture art {
+          content-fit: cover;
+          width-request: 240;
+          height-request: 240;
+          halign: center;
+          overflow: hidden;
+
+          styles [
+            "now-playing-art",
+          ]
+        }
+
+        Box {
+          orientation: vertical;
+          spacing: 2;
+
+          Label title {
+            ellipsize: end;
+            xalign: 0;
+            label: "";
+
+            styles [
+              "title-1",
+            ]
+          }
+
+          Label artist {
+            ellipsize: end;
+            xalign: 0;
+            label: "";
+
+            styles [
+              "title-4",
+              "dim-label",
+            ]
+          }
+        }
+
+        Box {
+          orientation: vertical;
+          spacing: 2;
+
+          Scale scrubber {
+            hexpand: true;
+            draw-value: false;
+
+            adjustment: Adjustment {
+              lower: 0;
+              upper: 0;
+              step-increment: 5000;
+              page-increment: 10000;
+            };
+          }
+
+          Box {
+            Label position {
+              label: "0∶00";
+              xalign: 0;
+              hexpand: true;
+
+              styles [
+                "numeric",
+                "caption",
+                "dim-label",
+              ]
+            }
+
+            Label duration {
+              label: "0∶00";
+              xalign: 1;
+
+              styles [
+                "numeric",
+                "caption",
+                "dim-label",
+              ]
+            }
+          }
+        }
+
+        $PlaybackControlsWidget controls {
+          halign: center;
+        }
+
+        Button queue_button {
+          halign: center;
+
+          styles [
+            "flat",
+          ]
+
+          Adw.ButtonContent {
+            icon-name: "music-queue-symbolic";
+            label: _("Queue");
+          }
+        }
+      }
+    };
+  }
+}

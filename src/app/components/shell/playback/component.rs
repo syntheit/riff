@@ -3,10 +3,8 @@ use std::rc::Rc;
 
 use crate::app::components::EventListener;
 use crate::app::models::*;
-use crate::app::state::{PlaybackAction, PlaybackEvent, ScreenName, SelectionEvent};
-use crate::app::{
-    ActionDispatcher, AppAction, AppEvent, AppModel, AppState, BrowserAction, Worker,
-};
+use crate::app::state::{PlaybackAction, PlaybackEvent, SelectionEvent};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
 
 use super::playback_widget::PlaybackWidget;
 
@@ -27,10 +25,8 @@ impl PlaybackModel {
         self.app_model.get_state()
     }
 
-    fn go_home(&self) {
-        self.dispatcher.dispatch(AppAction::ViewNowPlaying);
-        self.dispatcher
-            .dispatch(BrowserAction::NavigationPopTo(ScreenName::Home).into());
+    fn open_now_playing_sheet(&self) {
+        self.dispatcher.dispatch(AppAction::ShowNowPlayingSheet);
     }
 
     fn is_playing(&self) -> bool {
@@ -121,7 +117,7 @@ impl PlaybackControl {
         widget.connect_now_playing_clicked(clone!(
             #[weak]
             model,
-            move || model.go_home()
+            move || model.open_now_playing_sheet()
         ));
         widget.connect_volume_changed(clone!(
             #[weak]

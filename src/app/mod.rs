@@ -109,6 +109,12 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
+            App::make_now_playing_sheet(
+                builder,
+                Rc::clone(model),
+                dispatcher.box_clone(),
+                worker.clone(),
+            ),
             App::make_login(builder, dispatcher.box_clone()),
             App::make_navigation(
                 builder,
@@ -229,6 +235,18 @@ impl App {
             builder.object("playback").unwrap(),
             worker,
         ))
+    }
+
+    fn make_now_playing_sheet(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
+    ) -> Box<impl EventListener> {
+        let sheet: gtk::Widget = builder.object("now_playing_sheet").unwrap();
+        let widget: NowPlayingFullWidget = builder.object("now_playing_full").unwrap();
+        let model = NowPlayingSheetModel::new(app_model, dispatcher);
+        Box::new(NowPlayingSheet::new(model, sheet, widget, worker))
     }
 
     fn make_search_button(

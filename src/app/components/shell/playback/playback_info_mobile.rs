@@ -1,4 +1,5 @@
 use gettextrs::gettext;
+use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, CompositeTemplate};
 
@@ -51,5 +52,11 @@ impl PlaybackInfoMobileWidget {
         self.imp()
             .now_playing_label
             .set_text(&gettext("No song playing"));
+    }
+
+    pub fn connect_clicked<F: Fn() + 'static>(&self, f: F) {
+        let gesture = gtk::GestureClick::new();
+        gesture.connect_released(move |_, _, _, _| f());
+        self.add_controller(gesture);
     }
 }

@@ -13,115 +13,121 @@ Adw.ApplicationWindow window {
     }
   }
 
-  Box {
-    orientation: vertical;
+  Adw.BottomSheet now_playing_sheet {
+    // Non-modal so the window's ShortcutController (space to play/pause, etc.)
+    // keeps working while the sheet is open; the sheet covers the content anyway.
+    modal: false;
 
-    ShortcutController {
-      scope: local;
+    content: Box {
+      orientation: vertical;
 
-      Shortcut {
-        trigger: "space";
-        action: "action(app.toggle_playback)";
+      ShortcutController {
+        scope: local;
+
+        Shortcut {
+          trigger: "space";
+          action: "action(app.toggle_playback)";
+        }
+
+        Shortcut {
+          trigger: "<Ctrl>Q";
+          action: "action(app.quit)";
+        }
+
+        Shortcut {
+          trigger: "P";
+          action: "action(app.player_prev)";
+        }
+
+        Shortcut {
+          trigger: "N";
+          action: "action(app.player_next)";
+        }
+
+        Shortcut {
+          trigger: "<Alt>Left";
+          action: "action(app.nav_pop)";
+        }
+
+        Shortcut {
+          trigger: "<Ctrl>F";
+          action: "action(app.search)";
+        }
       }
 
-      Shortcut {
-        trigger: "<Ctrl>Q";
-        action: "action(app.quit)";
-      }
+      Adw.NavigationSplitView split_view {
+        vexpand: true;
 
-      Shortcut {
-        trigger: "P";
-        action: "action(app.player_prev)";
-      }
+        sidebar: Adw.NavigationPage {
+          title: "Sidebar";
 
-      Shortcut {
-        trigger: "N";
-        action: "action(app.player_next)";
-      }
+          child: Box {
+            orientation: vertical;
 
-      Shortcut {
-        trigger: "<Alt>Left";
-        action: "action(app.nav_pop)";
-      }
+            Adw.HeaderBar {
+              styles ["flat"]
 
-      Shortcut {
-        trigger: "<Ctrl>F";
-        action: "action(app.search)";
-      }
-    }
+              Button search_button {
+                icon-name: "system-search-symbolic";
+                focus-on-click: false;
+                can-focus: false;
+              }
 
-    Adw.NavigationSplitView split_view {
-      vexpand: true;
+              ToggleButton skeleton_toggle {
+                icon-name: "checkbox-mixed-symbolic";
+                focus-on-click: false;
+                can-focus: false;
+                visible: false;
+              }
 
-      sidebar: Adw.NavigationPage {
-        title: "Sidebar";
+              [title]
+              Adw.WindowTitle {
+                title: "Riff";
+              }
 
-        child: Box {
-          orientation: vertical;
-
-          Adw.HeaderBar {
-            styles ["flat"]
-
-            Button search_button {
-              icon-name: "system-search-symbolic";
-              focus-on-click: false;
-              can-focus: false;
+              [end]
+              MenuButton user {
+                icon-name: "open-menu-symbolic";
+                focus-on-click: false;
+                can-focus: false;
+              }
             }
 
-            ToggleButton skeleton_toggle {
-              icon-name: "checkbox-mixed-symbolic";
-              focus-on-click: false;
-              can-focus: false;
-              visible: false;
-            }
+            ScrolledWindow {
+              hscrollbar-policy: never;
+              ListBox home_listbox {
+                width-request: 200;
+                vexpand: true;
 
-            [title]
-            Adw.WindowTitle {
-              title: "Riff";
+                styles [
+                  "navigation-sidebar",
+                ]
+              }
             }
+          };
+        };
 
-            [end]
-            MenuButton user {
-              icon-name: "open-menu-symbolic";
-              focus-on-click: false;
-              can-focus: false;
-            }
-          }
+        content: Adw.NavigationPage {
+          tag: "main";
+          title: "Home";
 
-          ScrolledWindow {
-            hscrollbar-policy: never;
-            ListBox home_listbox {
-              width-request: 200;
+          child: Box {
+            orientation: vertical;
+
+            Adw.ToastOverlay main {
+              hexpand: true;
               vexpand: true;
 
-              styles [
-                "navigation-sidebar",
-              ]
+              Stack navigation_stack {
+                transition-type: slide_left_right;
+              }
             }
-          }
+          };
         };
-      };
+      }
+    };
 
-      content: Adw.NavigationPage {
-        tag: "main";
-        title: "Home";
-
-        child: Box {
-          orientation: vertical;
-
-          Adw.ToastOverlay main {
-            hexpand: true;
-            vexpand: true;
-
-            Stack navigation_stack {
-              transition-type: slide_left_right;
-            }
-          }
-
-
-        };
-      };
-    }
+    [bottom-bar]
     Overlay {
       hexpand: true;
 
@@ -133,6 +139,10 @@ Adw.ApplicationWindow window {
       $SelectionToolbarWidget selection_toolbar {
         hexpand: "1";
       }
+    }
+
+    [sheet]
+    $NowPlayingFullWidget now_playing_full {
     }
   }
 }
