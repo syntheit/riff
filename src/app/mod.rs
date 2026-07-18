@@ -178,8 +178,8 @@ impl App {
         let root_nav: libadwaita::NavigationView = builder.object("root_nav").unwrap();
         let tab_stack: libadwaita::ViewStack = builder.object("tab_stack").unwrap();
         // This is where components that are not created initially will be assembled
-        let screen_factory = ScreenFactory::new(app_model, dispatcher, worker);
-        Box::new(Navigation::new(root_nav, tab_stack, screen_factory))
+        let screen_factory = ScreenFactory::new(app_model, dispatcher.box_clone(), worker);
+        Box::new(Navigation::new(root_nav, tab_stack, screen_factory, dispatcher))
     }
 
     fn make_login(builder: &gtk::Builder, dispatcher: Box<dyn ActionDispatcher>) -> Box<Login> {

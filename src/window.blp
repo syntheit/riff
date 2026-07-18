@@ -7,7 +7,8 @@ Adw.ApplicationWindow window {
 
   Adw.BottomSheet now_playing_sheet {
     // Non-modal so the window's ShortcutController keeps working while the sheet
-    // is open; the sheet covers the content anyway.
+    // is open. Opened by tapping the mini-player; there is no collapsed bottom-bar
+    // (the mini-player + tab bar live in the content so they're always visible).
     modal: false;
 
     content: Box {
@@ -47,12 +48,11 @@ Adw.ApplicationWindow window {
         }
       }
 
+      // Tab shell + pushed detail pages.
       Adw.ToastOverlay main {
         hexpand: true;
         vexpand: true;
 
-        // One navigation view for the whole app: the tab shell is its root page;
-        // album/artist/playlist/user detail pages push on top (with swipe-back).
         Adw.NavigationView root_nav {
           Adw.NavigationPage {
             title: _("Riff");
@@ -72,36 +72,34 @@ Adw.ApplicationWindow window {
                 }
               }
 
-              // The three tabs. Pages are populated in Rust (Navigation) so the
-              // existing screen components can be reused unchanged.
               content: Adw.ViewStack tab_stack {
                 vexpand: true;
               };
-
-              [bottom]
-              Adw.ViewSwitcherBar tab_bar {
-                stack: tab_stack;
-                reveal: true;
-              }
             };
           }
         }
       }
+
+      // Mini-player, above the tab bar (Spotify order).
+      Overlay {
+        hexpand: true;
+
+        $PlaybackWidget playback {
+          hexpand: "1";
+        }
+
+        [overlay]
+        $SelectionToolbarWidget selection_toolbar {
+          hexpand: "1";
+        }
+      }
+
+      // Bottom tab bar (Home / Search / Library), always visible.
+      Adw.ViewSwitcherBar tab_bar {
+        stack: tab_stack;
+        reveal: true;
+      }
     };
-
-    [bottom-bar]
-    Overlay {
-      hexpand: true;
-
-      $PlaybackWidget playback {
-        hexpand: "1";
-      }
-
-      [overlay]
-      $SelectionToolbarWidget selection_toolbar {
-        hexpand: "1";
-      }
-    }
 
     [sheet]
     $NowPlayingFullWidget now_playing_full {

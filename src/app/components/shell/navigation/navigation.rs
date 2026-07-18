@@ -3,7 +3,7 @@ use gtk::prelude::WidgetExt;
 
 use crate::app::components::{Component, EventListener, ListenerComponent};
 use crate::app::state::ScreenName;
-use crate::app::{AppEvent, BrowserEvent};
+use crate::app::{ActionDispatcher, AppEvent, BrowserAction, BrowserEvent};
 
 use super::factory::ScreenFactory;
 
@@ -17,6 +17,7 @@ pub struct Navigation {
     root_nav: libadwaita::NavigationView,
     tab_stack: libadwaita::ViewStack,
     screen_factory: ScreenFactory,
+    dispatcher: Box<dyn ActionDispatcher>,
     tab_roots: Vec<Box<dyn ListenerComponent>>,
     children: Vec<Box<dyn ListenerComponent>>,
 }
@@ -26,11 +27,13 @@ impl Navigation {
         root_nav: libadwaita::NavigationView,
         tab_stack: libadwaita::ViewStack,
         screen_factory: ScreenFactory,
+        dispatcher: Box<dyn ActionDispatcher>,
     ) -> Self {
         Self {
             root_nav,
             tab_stack,
             screen_factory,
+            dispatcher,
             tab_roots: vec![],
             children: vec![],
         }
@@ -63,6 +66,12 @@ impl Navigation {
             "library-music-symbolic",
         );
         self.tab_stack.set_visible_child_name("home");
+
+        // Tapping a bottom tab while a detail page is open returns to the tab shell.
+        let dispatcher = self.dispatcher.box_clone();
+        self.tab_stack.connect_visible_child_notify(move |_| {
+            dispatcher.dispatch(BrowserAction::NavigationPopTo(ScreenName::Home).into());
+        });
 
         self.tab_roots = vec![home, search, library];
     }
