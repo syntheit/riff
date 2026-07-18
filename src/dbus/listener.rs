@@ -63,7 +63,7 @@ impl AppPlaybackStateListener {
         let state = self.app_model.get_state();
         (
             state.playback.prev_index().is_some(),
-            state.playback.next_index().is_some(),
+            state.playback.next_id().is_some(),
         )
     }
 

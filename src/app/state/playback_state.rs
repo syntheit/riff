@@ -1,9 +1,10 @@
 use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::app::models::*;
 use crate::app::state::{AppAction, AppEvent, UpdatableState};
-use crate::app::{BatchQuery, LazyRandomIndex, SongsSource};
+use crate::app::{LazyRandomIndex, SongsSource};
 
 #[derive(Debug)]
 pub struct PlaybackState {
@@ -22,6 +23,12 @@ pub struct PlaybackState {
     // Last volume that was applied (0.0..=1.0). Initialised to a sentinel
     // outside the valid range so the first `SetVolume` always propagates.
     volume: f64,
+    // Spotify-style manual queue: tracks the user explicitly queued, played in
+    // order right after the current track, ahead of the context. While a queued
+    // track plays it's held in `current_override` so `list_position` stays parked
+    // on the context track and playback resumes there when the queue drains.
+    manual_queue: VecDeque<SongDescription>,
+    current_override: Option<SongDescription>,
 }
 
 // Most mutatings methods shouldn't be pub
@@ -32,7 +39,7 @@ impl PlaybackState {
     }
 
     pub fn is_playing(&self) -> bool {
-        self.is_playing && self.list_position.is_some()
+        self.is_playing && (self.list_position.is_some() || self.current_override.is_some())
     }
 
     pub fn is_shuffled(&self) -> bool {
@@ -41,23 +48,6 @@ impl PlaybackState {
 
     pub fn repeat_mode(&self) -> RepeatMode {
         self.repeat
-    }
-
-    // Whatever batch of songs we would need to grab if we were to play the next track
-    pub fn next_query(&self) -> Option<BatchQuery> {
-        let next_index = self.next_index()?;
-        let next_index = if self.is_shuffled {
-            self.index.get(next_index)?
-        } else {
-            next_index
-        };
-        let batch = self.songs.needed_batch_for(next_index);
-        if let Some(batch) = batch {
-            let source = self.source.as_ref().cloned()?;
-            Some(BatchQuery { source, batch })
-        } else {
-            None
-        }
     }
 
     fn index(&self, i: usize) -> Option<SongDescription> {
@@ -78,14 +68,23 @@ impl PlaybackState {
     }
 
     pub fn current_song_id(&self) -> Option<String> {
+        if let Some(song) = &self.current_override {
+            return Some(song.id.clone());
+        }
         Some(self.index(self.list_position?)?.id)
     }
 
     pub fn current_song(&self) -> Option<SongDescription> {
+        if let Some(song) = &self.current_override {
+            return Some(song.clone());
+        }
         self.index(self.list_position?)
     }
 
-    fn next_id(&self) -> Option<String> {
+    pub fn next_id(&self) -> Option<String> {
+        if let Some(song) = self.manual_queue.front() {
+            return Some(song.id.clone());
+        }
         self.next_index()
             .and_then(|i| Some(self.songs().index(i)?.description().id.clone()))
     }
@@ -94,6 +93,8 @@ impl PlaybackState {
         self.source = source;
         self.index = Default::default();
         self.list_position = None;
+        self.manual_queue.clear();
+        self.current_override = None;
         self.songs.clear()
     }
 
@@ -116,16 +117,39 @@ impl PlaybackState {
         self.index.grow(self.songs.len());
     }
 
+    // Test-only helper to build up a context playlist (append tracks, grow the
+    // shuffle index). Real "add to queue" goes through `queue_next`.
+    #[cfg(test)]
     pub fn queue(&mut self, tracks: Vec<SongDescription>) {
         self.source = None;
         self.songs.append(tracks).commit();
         self.index.grow(self.songs.len());
     }
 
+    // Spotify "add to queue": plays after the current track (and any earlier
+    // queued tracks), then playback returns to the context.
+    pub fn queue_next(&mut self, tracks: Vec<SongDescription>) {
+        self.manual_queue.extend(tracks);
+    }
+
+    pub fn manual_queue(&self) -> impl Iterator<Item = &SongDescription> + '_ {
+        self.manual_queue.iter()
+    }
+
+    // The upcoming context tracks after the current one (for the queue view).
+    pub fn next_context_tracks(&self, limit: usize) -> Vec<SongDescription> {
+        let start = self.list_position.map(|p| p + 1).unwrap_or(0);
+        (start..start.saturating_add(limit))
+            .filter_map(|i| self.index(i))
+            .collect()
+    }
+
     pub fn dequeue(&mut self, ids: &[String]) {
-        let current_id = self.current_song_id();
+        self.manual_queue.retain(|s| !ids.contains(&s.id));
+        // Keep list_position parked on the same context track (ignore any override).
+        let context_id = self.list_position.and_then(|p| self.index(p)).map(|s| s.id);
         self.songs.remove(ids).commit();
-        self.list_position = current_id.and_then(|id| self.songs.find_index(&id));
+        self.list_position = context_id.and_then(|id| self.songs.find_index(&id));
         self.index.shrink(self.songs.len());
     }
 
@@ -181,11 +205,14 @@ impl PlaybackState {
 
     fn stop(&mut self) {
         self.list_position = None;
+        self.manual_queue.clear();
+        self.current_override = None;
         self.is_playing = false;
         self.seek_position.set(0, false);
     }
 
     fn play_index(&mut self, index: usize) -> Option<String> {
+        self.current_override = None;
         self.is_playing = true;
         self.list_position.replace(index);
         self.seek_position.set(0, true);
@@ -194,6 +221,14 @@ impl PlaybackState {
     }
 
     fn play_next(&mut self) -> Option<String> {
+        // Manual queue plays first, ahead of the context.
+        if let Some(song) = self.manual_queue.pop_front() {
+            let id = song.id.clone();
+            self.current_override = Some(song);
+            self.is_playing = true;
+            self.seek_position.set(0, true);
+            return Some(id);
+        }
         self.next_index().and_then(|i| {
             self.seek_position.set(0, true);
             self.play_index(i)
@@ -216,6 +251,11 @@ impl PlaybackState {
     }
 
     fn play_prev(&mut self) -> Option<String> {
+        // Can't navigate backwards into the manual queue; restart the queued track.
+        if self.current_override.is_some() {
+            self.seek_position.set(0, true);
+            return None;
+        }
         self.prev_index().and_then(|i| {
             // Only jump to the previous track if we aren't more than 2 seconds (2,000 ms) into the current track.
             // Otherwise, seek to the start of the current track.
@@ -245,7 +285,7 @@ impl PlaybackState {
     }
 
     fn toggle_play(&mut self) -> Option<bool> {
-        if self.list_position.is_some() {
+        if self.list_position.is_some() || self.current_override.is_some() {
             self.is_playing = !self.is_playing;
 
             match self.is_playing {
@@ -288,6 +328,8 @@ impl Default for PlaybackState {
             is_playing: false,
             is_shuffled: false,
             volume: -1.0,
+            manual_queue: VecDeque::new(),
+            current_override: None,
         }
     }
 }
@@ -461,7 +503,7 @@ impl UpdatableState for PlaybackState {
                 vec![PlaybackEvent::PlaylistChanged, PlaybackEvent::SourceChanged]
             }
             PlaybackAction::Queue(tracks) => {
-                self.queue(tracks);
+                self.queue_next(tracks);
                 vec![PlaybackEvent::PlaylistChanged]
             }
             PlaybackAction::Dequeue(id) => {
@@ -627,6 +669,45 @@ mod tests {
 
         state.queue(vec![song("4")]);
         assert_eq!(state.songs().len(), 4);
+    }
+
+    #[test]
+    fn test_manual_queue_plays_next_then_resumes_context() {
+        let mut state = PlaybackState::default();
+        state.queue(vec![song("1"), song("2"), song("3")]);
+        state.play("1");
+        assert_eq!(state.current_song_id(), Some("1".to_string()));
+
+        // Queue two tracks: they play right after the current one, before context.
+        state.queue_next(vec![song("q1"), song("q2")]);
+        assert_eq!(state.next_id(), Some("q1".to_string()));
+
+        state.play_next();
+        assert_eq!(state.current_song_id(), Some("q1".to_string()));
+        // list_position stays parked on the context track "1".
+        assert_eq!(state.current_position(), Some(0));
+
+        state.play_next();
+        assert_eq!(state.current_song_id(), Some("q2".to_string()));
+
+        // Queue drained -> context resumes at the track after "1".
+        state.play_next();
+        assert_eq!(state.current_song_id(), Some("2".to_string()));
+        assert_eq!(state.current_position(), Some(1));
+    }
+
+    #[test]
+    fn test_dequeue_removes_from_manual_queue() {
+        let mut state = PlaybackState::default();
+        state.queue(vec![song("1"), song("2")]);
+        state.play("1");
+        state.queue_next(vec![song("q1"), song("q2")]);
+
+        state.dequeue(&["q1".to_string()]);
+        assert_eq!(state.next_id(), Some("q2".to_string()));
+        // Context is untouched.
+        assert_eq!(state.current_song_id(), Some("1".to_string()));
+        assert_eq!(state.songs().len(), 2);
     }
 
     #[test]

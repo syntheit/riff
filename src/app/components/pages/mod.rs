@@ -10,8 +10,8 @@ pub use details_playlist::*;
 mod details_user;
 pub use details_user::*;
 
-mod now_playing;
-pub use now_playing::*;
+mod queue;
+pub use queue::*;
 
 mod login;
 pub use login::*;

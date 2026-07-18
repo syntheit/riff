@@ -151,7 +151,7 @@ impl AppState {
             // Cross-state actions: multiple "substates" are affected by these actions, that's why they're handled here
             // Might need some clean-up
             AppAction::QueueSelection => {
-                self.playback.queue(self.selection.take_selection());
+                self.playback.queue_next(self.selection.take_selection());
                 vec![
                     SelectionEvent::SelectionModeChanged(false).into(),
                     PlaybackEvent::PlaylistChanged.into(),

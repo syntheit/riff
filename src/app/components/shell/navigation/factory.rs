@@ -102,11 +102,8 @@ impl ScreenFactory {
     }
 
     pub fn make_now_playing(&self) -> impl ListenerComponent {
-        let model = Rc::new(NowPlayingModel::new(
-            Rc::clone(&self.app_model),
-            self.dispatcher.box_clone(),
-        ));
-        NowPlaying::new(model, self.worker.clone())
+        let model = QueueModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
+        Queue::new(model, self.worker.clone())
     }
 
     pub fn make_saved_tracks(&self) -> impl ListenerComponent {
