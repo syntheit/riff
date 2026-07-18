@@ -4,6 +4,7 @@ use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::app::components::{Component, EventListener};
+use crate::app::loader::ImageLoader;
 use crate::app::models::SongDescription;
 use crate::app::state::{PlaybackAction, PlaybackEvent, PlaybackState};
 use crate::app::{ActionDispatcher, AppEvent, AppModel, Worker};
@@ -49,16 +50,42 @@ impl QueueModel {
         self.dispatcher
             .dispatch(PlaybackAction::Load(id.to_string()).into());
     }
+
+    pub fn move_in_queue(&self, id: &str, to: usize) {
+        self.dispatcher.dispatch(
+            PlaybackAction::MoveInQueue {
+                id: id.to_string(),
+                to,
+            }
+            .into(),
+        );
+    }
 }
 
 pub struct Queue {
     model: Rc<QueueModel>,
-    root: gtk::ScrolledWindow,
+    // The component root is a vertical Box: [header strip] + [ScrolledWindow].
+    // The header is non-scrolling so the AdwBottomSheet can receive swipe-down
+    // drags on it, letting the card dismiss without fighting the ScrolledWindow.
+    root: gtk::Box,
     list: gtk::Box,
+    worker: Worker,
 }
 
 impl Queue {
-    pub fn new(model: QueueModel, _worker: Worker) -> Self {
+    pub fn new(model: QueueModel, worker: Worker) -> Self {
+        // Non-scrolling header — "Queue" title + padding. Swiping down here
+        // reaches the AdwBottomSheet drag handler instead of scrolling the list.
+        let header = gtk::Label::builder()
+            .label(gettext("Queue"))
+            .css_classes(["title-3"])
+            .xalign(0.5)
+            .margin_top(12)
+            .margin_bottom(8)
+            .margin_start(16)
+            .margin_end(16)
+            .build();
+
         let list = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)
@@ -71,16 +98,23 @@ impl Queue {
             .maximum_size(600)
             .child(&list)
             .build();
-        let root = gtk::ScrolledWindow::builder()
+        let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
             .child(&clamp)
             .build();
 
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .build();
+        root.append(&header);
+        root.append(&scroll);
+
         let this = Self {
             model: Rc::new(model),
             root,
             list,
+            worker,
         };
         this.refresh();
         this
@@ -121,19 +155,76 @@ impl Queue {
         text
     }
 
-    fn manual_row(&self, song: &SongDescription) {
+    // A 48×48 thumbnail placeholder that will be filled asynchronously once the
+    // art URL is fetched. Returns the Image widget so the caller can position it.
+    fn art_thumbnail(song: &SongDescription, worker: &Worker) -> gtk::Image {
+        let image = gtk::Image::builder()
+            .pixel_size(48)
+            .valign(gtk::Align::Center)
+            .build();
+
+        if let Some(url) = song
+            .art
+            .as_ref()
+            .and_then(|s| s.best_for_width(48))
+            .map(str::to_owned)
+        {
+            let weak = image.downgrade();
+            worker.send_local_task(async move {
+                if let Some(img) = weak.upgrade() {
+                    let loader = ImageLoader::new();
+                    if let Some(pixbuf) = loader.load_remote(&url, "jpg", 48, 48).await {
+                        let texture = gdk::Texture::for_pixbuf(&pixbuf);
+                        img.set_paintable(Some(&texture));
+                    }
+                }
+            });
+        }
+
+        image
+    }
+
+    fn manual_row(&self, song: &SongDescription, position: usize, queue_len: usize) {
         let row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
             .spacing(8)
             .margin_top(4)
             .margin_bottom(4)
             .build();
+
+        row.append(&Self::art_thumbnail(song, &self.worker));
         row.append(&Self::text_box(song));
 
-        let glyph = gtk::Image::from_icon_name("view-list-symbolic");
-        glyph.add_css_class("dim-label");
-        glyph.set_tooltip_text(Some(&gettext("In your queue")));
-        row.append(&glyph);
+        // Up/down reorder buttons — reliable on touch, no DnD plumbing needed.
+        let up_btn = gtk::Button::builder()
+            .icon_name("go-up-symbolic")
+            .css_classes(["flat", "circular"])
+            .valign(gtk::Align::Center)
+            .tooltip_text(gettext("Move up"))
+            .sensitive(position > 0)
+            .build();
+        let id_up = song.id.clone();
+        let model_up = self.model.clone();
+        up_btn.connect_clicked(move |_| {
+            model_up.move_in_queue(&id_up, position.saturating_sub(1));
+        });
+        row.append(&up_btn);
+
+        let down_btn = gtk::Button::builder()
+            .icon_name("go-down-symbolic")
+            .css_classes(["flat", "circular"])
+            .valign(gtk::Align::Center)
+            .tooltip_text(gettext("Move down"))
+            .sensitive(position + 1 < queue_len)
+            .build();
+        let id_down = song.id.clone();
+        let model_down = self.model.clone();
+        down_btn.connect_clicked(move |_| {
+            // Target the slot just past this row; move_in_queue clamps to the
+            // new length after removing the row from its current spot.
+            model_down.move_in_queue(&id_down, position + 1);
+        });
+        row.append(&down_btn);
 
         let remove = gtk::Button::builder()
             .icon_name("list-remove-symbolic")
@@ -150,8 +241,15 @@ impl Queue {
     }
 
     fn context_row(&self, song: &SongDescription) {
+        let inner = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .build();
+        inner.append(&Self::art_thumbnail(song, &self.worker));
+        inner.append(&Self::text_box(song));
+
         let button = gtk::Button::builder()
-            .child(&Self::text_box(song))
+            .child(&inner)
             .css_classes(["flat"])
             .build();
         let id = song.id.clone();
@@ -165,9 +263,11 @@ impl Queue {
     fn current_row(&self, song: &SongDescription) {
         let row = gtk::Box::builder()
             .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
             .margin_top(4)
             .margin_bottom(4)
             .build();
+        row.append(&Self::art_thumbnail(song, &self.worker));
         row.append(&Self::text_box(song));
         self.list.append(&row);
     }
@@ -198,8 +298,9 @@ impl Queue {
         }
         if !manual.is_empty() {
             self.section_label(&gettext("Next in queue"));
-            for song in &manual {
-                self.manual_row(song);
+            let manual_len = manual.len();
+            for (i, song) in manual.iter().enumerate() {
+                self.manual_row(song, i, manual_len);
             }
         }
         if !context.is_empty() {

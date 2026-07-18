@@ -136,6 +136,20 @@ impl PlaybackState {
         self.manual_queue.iter()
     }
 
+    // Move the manual-queue item with `id` to position `to` (0-based).
+    // Adjusts `to` for the removal shift. Clamps `to` to the valid range; no-ops
+    // when `id` is not found in the manual queue.
+    pub fn move_in_queue(&mut self, id: &str, to: usize) {
+        let from = match self.manual_queue.iter().position(|s| s.id == id) {
+            Some(i) => i,
+            None => return,
+        };
+        let song = self.manual_queue.remove(from).unwrap();
+        // After removal the VecDeque is one shorter; clamp to the new length.
+        let insert_at = to.min(self.manual_queue.len());
+        self.manual_queue.insert(insert_at, song);
+    }
+
     // The upcoming context tracks after the current one (for the queue view).
     pub fn next_context_tracks(&self, limit: usize) -> Vec<SongDescription> {
         let start = self.list_position.map(|p| p + 1).unwrap_or(0);
@@ -357,6 +371,10 @@ pub enum PlaybackAction {
     PreloadNext,
     Queue(Vec<SongDescription>),
     Dequeue(String),
+    MoveInQueue {
+        id: String,
+        to: usize,
+    },
     SwitchDevice(Device),
     SetAvailableDevices(Vec<ConnectDevice>),
 }
@@ -508,6 +526,10 @@ impl UpdatableState for PlaybackState {
             }
             PlaybackAction::Dequeue(id) => {
                 self.dequeue(&[id]);
+                vec![PlaybackEvent::PlaylistChanged]
+            }
+            PlaybackAction::MoveInQueue { id, to } => {
+                self.move_in_queue(&id, to);
                 vec![PlaybackEvent::PlaylistChanged]
             }
             PlaybackAction::Seek(pos) => {
@@ -708,6 +730,34 @@ mod tests {
         // Context is untouched.
         assert_eq!(state.current_song_id(), Some("1".to_string()));
         assert_eq!(state.songs().len(), 2);
+    }
+
+    #[test]
+    fn test_move_in_queue() {
+        let mut state = PlaybackState::default();
+        state.queue(vec![song("ctx")]);
+        state.play("ctx");
+        state.queue_next(vec![song("a"), song("b"), song("c")]);
+
+        // Move "c" (index 2) to the front (index 0).
+        state.move_in_queue("c", 0);
+        let ids: Vec<_> = state.manual_queue().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "a", "b"]);
+
+        // Move "a" (now at index 1) to the end (index 2).
+        state.move_in_queue("a", 2);
+        let ids: Vec<_> = state.manual_queue().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "b", "a"]);
+
+        // No-op: unknown id.
+        state.move_in_queue("z", 0);
+        let ids: Vec<_> = state.manual_queue().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["c", "b", "a"]);
+
+        // Clamp: to index way past end.
+        state.move_in_queue("c", 999);
+        let ids: Vec<_> = state.manual_queue().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["b", "a", "c"]);
     }
 
     #[test]
