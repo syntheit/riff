@@ -115,15 +115,6 @@ impl Navigation {
         self.root_nav.pop_to_tag("tabs");
         self.children.clear();
     }
-
-    fn show_queue(&mut self) {
-        // Don't stack duplicate queue pages if one is already open.
-        if self.root_nav.find_page("now-playing").is_some() {
-            return;
-        }
-        let component = Box::new(self.screen_factory.make_now_playing());
-        self.push_component(component, "now-playing");
-    }
 }
 
 impl EventListener for Navigation {
@@ -134,7 +125,6 @@ impl EventListener for Navigation {
             AppEvent::BrowserEvent(BrowserEvent::NavigationPopped) => self.pop(),
             AppEvent::BrowserEvent(BrowserEvent::NavigationPoppedTo(_)) => self.pop_to_root(),
             AppEvent::SearchTabShown => self.tab_stack.set_visible_child_name("search"),
-            AppEvent::NowPlayingShown => self.show_queue(),
             _ => {}
         };
         for child in self.tab_roots.iter_mut() {

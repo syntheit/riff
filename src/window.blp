@@ -5,7 +5,14 @@ Adw.ApplicationWindow window {
   default-width: 1080;
   default-height: 720;
 
-  Adw.BottomSheet now_playing_sheet {
+  // Queue overlay. Sits above everything (including the open player) as a
+  // partial-height card that dims the player behind it — like Spotify's queue.
+  // Opened by the player's queue button; swipe down or tap the dimmed player to
+  // dismiss back to the player.
+  Adw.BottomSheet queue_sheet {
+    modal: true;
+
+    content: Adw.BottomSheet now_playing_sheet {
     // Non-modal so the window's ShortcutController keeps working while the sheet
     // is open. Opened by tapping the mini-player; there is no collapsed bottom-bar
     // (the mini-player + tab bar live in the content so they're always visible).
@@ -103,6 +110,19 @@ Adw.ApplicationWindow window {
 
     [sheet]
     $NowPlayingFullWidget now_playing_full {
+    }
+    };
+
+    // The queue card. height-request keeps it partial (~65%) so the player
+    // stays visible behind it; the list scrolls within. Device-tuned.
+    [sheet]
+    Box {
+      orientation: vertical;
+      height-request: 600;
+
+      Adw.Bin queue_host {
+        vexpand: true;
+      }
     }
   }
 }

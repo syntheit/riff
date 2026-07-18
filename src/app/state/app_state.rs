@@ -25,7 +25,6 @@ pub enum AppAction {
     Start,
     Raise,
     ShowNotification(String),
-    ViewNowPlaying,
     ShowNowPlayingSheet,
     ShowSearchTab,
     // Cross-state actions
@@ -107,7 +106,6 @@ pub enum AppEvent {
     Raised,
     NotificationShown(String),
     PlaylistCreatedNotificationShown(String),
-    NowPlayingShown,
     NowPlayingSheetShown,
     SearchTabShown,
     SettingsEvent(SettingsEvent),
@@ -144,7 +142,6 @@ impl AppState {
             // Couple of actions that don't mutate the state (not intested in keeping track of what they change)
             // they're here just to have a consistent way of doing things (always an Action)
             AppAction::ShowNotification(c) => vec![AppEvent::NotificationShown(c)],
-            AppAction::ViewNowPlaying => vec![AppEvent::NowPlayingShown],
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
             AppAction::ShowSearchTab => vec![AppEvent::SearchTabShown],
             AppAction::Raise => vec![AppEvent::Raised],

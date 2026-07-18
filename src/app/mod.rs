@@ -3,6 +3,7 @@ use crate::settings::{RiffSettings, StateTracker};
 use crate::{api::CachedSpotifyClient, feature_flags};
 use futures::channel::mpsc::UnboundedSender;
 use gtk::prelude::*;
+use libadwaita::prelude::BinExt;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -115,6 +116,12 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
+            App::make_queue(
+                builder,
+                Rc::clone(model),
+                dispatcher.box_clone(),
+                worker.clone(),
+            ),
             App::make_login(builder, dispatcher.box_clone()),
             App::make_navigation(
                 builder,
@@ -179,7 +186,12 @@ impl App {
         let tab_stack: libadwaita::ViewStack = builder.object("tab_stack").unwrap();
         // This is where components that are not created initially will be assembled
         let screen_factory = ScreenFactory::new(app_model, dispatcher.box_clone(), worker);
-        Box::new(Navigation::new(root_nav, tab_stack, screen_factory, dispatcher))
+        Box::new(Navigation::new(
+            root_nav,
+            tab_stack,
+            screen_factory,
+            dispatcher,
+        ))
     }
 
     fn make_login(builder: &gtk::Builder, dispatcher: Box<dyn ActionDispatcher>) -> Box<Login> {
@@ -220,11 +232,32 @@ impl App {
         worker: Worker,
     ) -> Box<impl EventListener> {
         let sheet: gtk::Widget = builder.object("now_playing_sheet").unwrap();
+        let queue_sheet: gtk::Widget = builder.object("queue_sheet").unwrap();
         let widget: NowPlayingFullWidget = builder.object("now_playing_full").unwrap();
         let model = NowPlayingSheetModel::new(app_model, dispatcher);
-        Box::new(NowPlayingSheet::new(model, sheet, widget, worker))
+        Box::new(NowPlayingSheet::new(
+            model,
+            sheet,
+            queue_sheet,
+            widget,
+            worker,
+        ))
     }
 
+    // The queue card, hosted inside the queue_sheet overlay. It listens to
+    // playback events and rebuilds itself, so it's always current when opened.
+    fn make_queue(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
+    ) -> Box<impl EventListener> {
+        let host: libadwaita::Bin = builder.object("queue_host").unwrap();
+        let model = QueueModel::new(app_model, dispatcher);
+        let queue = Queue::new(model, worker);
+        host.set_child(Some(queue.get_root_widget()));
+        Box::new(queue)
+    }
 
     fn make_user_menu(
         builder: &gtk::Builder,

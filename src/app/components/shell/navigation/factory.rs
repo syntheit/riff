@@ -101,11 +101,6 @@ impl ScreenFactory {
         Self::make_card_page(page, screen_model)
     }
 
-    pub fn make_now_playing(&self) -> impl ListenerComponent {
-        let model = QueueModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
-        Queue::new(model, self.worker.clone())
-    }
-
     pub fn make_saved_tracks(&self) -> impl ListenerComponent {
         let model = Rc::new(SavedTracksModel::new(
             Rc::clone(&self.app_model),

@@ -6,7 +6,7 @@ use gtk::prelude::*;
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
 use crate::app::state::{PlaybackAction, PlaybackEvent};
-use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
+use crate::app::{ActionDispatcher, AppEvent, AppModel, AppState, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
 
@@ -60,11 +60,6 @@ impl NowPlayingSheetModel {
             .dispatch(PlaybackAction::Seek(position).into());
     }
 
-    fn view_queue(&self) {
-        // Pushes the queue page on top of the tab shell.
-        self.dispatcher.dispatch(AppAction::ViewNowPlaying);
-    }
-
     fn is_playing(&self) -> bool {
         self.state().playback.is_playing()
     }
@@ -96,6 +91,7 @@ impl NowPlayingSheet {
     pub fn new(
         model: NowPlayingSheetModel,
         sheet: gtk::Widget,
+        queue_sheet: gtk::Widget,
         widget: NowPlayingFullWidget,
         worker: Worker,
     ) -> Self {
@@ -131,15 +127,11 @@ impl NowPlayingSheet {
             model,
             move |position| model.seek_to(position)
         ));
+        // Open the queue card over the player (player stays open behind it).
         widget.connect_queue(clone!(
             #[weak]
-            model,
-            #[weak]
-            sheet,
-            move || {
-                model.view_queue();
-                set_sheet_open(&sheet, false);
-            }
+            queue_sheet,
+            move || set_sheet_open(&queue_sheet, true)
         ));
         widget.connect_close(clone!(
             #[weak]
