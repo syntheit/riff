@@ -5,10 +5,8 @@ use gtk::prelude::*;
 
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
-use crate::app::state::{PlaybackAction, PlaybackEvent, ScreenName};
-use crate::app::{
-    ActionDispatcher, AppAction, AppEvent, AppModel, AppState, BrowserAction, Worker,
-};
+use crate::app::state::{PlaybackAction, PlaybackEvent};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
 
@@ -63,9 +61,8 @@ impl NowPlayingSheetModel {
     }
 
     fn view_queue(&self) {
+        // Pushes the queue page on top of the tab shell.
         self.dispatcher.dispatch(AppAction::ViewNowPlaying);
-        self.dispatcher
-            .dispatch(BrowserAction::NavigationPopTo(ScreenName::Home).into());
     }
 
     fn is_playing(&self) -> bool {

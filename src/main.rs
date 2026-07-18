@@ -189,7 +189,7 @@ fn register_actions(app: &gtk::Application, sender: UnboundedSender<AppAction>) 
 
     app.add_action(&make_action(
         "search",
-        AppAction::BrowserAction(BrowserAction::NavigationPush(ScreenName::Search)),
+        AppAction::ShowSearchTab,
         sender.clone(),
     ));
 

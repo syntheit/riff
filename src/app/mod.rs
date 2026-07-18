@@ -122,24 +122,9 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
-            App::make_search_button(builder, dispatcher.box_clone()),
             App::make_user_menu(builder, Rc::clone(model), dispatcher),
             App::make_notification(builder),
         ];
-
-        // Wire up skeleton toggle button (debug-only feature)
-        if feature_flags::is_enabled(feature_flags::FeatureFlag::DebugSkeleton) {
-            let skeleton_toggle: gtk::ToggleButton = builder.object("skeleton_toggle").unwrap();
-            let window: libadwaita::ApplicationWindow = builder.object("window").unwrap();
-            skeleton_toggle.set_visible(true);
-            skeleton_toggle.connect_toggled(move |btn| {
-                if btn.is_active() {
-                    window.add_css_class("force-skeleton");
-                } else {
-                    window.remove_css_class("force-skeleton");
-                }
-            });
-        }
 
         self.components.append(&mut components);
     }
@@ -190,20 +175,11 @@ impl App {
         dispatcher: Box<dyn ActionDispatcher>,
         worker: Worker,
     ) -> Box<Navigation> {
-        let split_view: libadwaita::NavigationSplitView = builder.object("split_view").unwrap();
-        let navigation_stack: gtk::Stack = builder.object("navigation_stack").unwrap();
-        let home_listbox: gtk::ListBox = builder.object("home_listbox").unwrap();
-        let model = NavigationModel::new(Rc::clone(&app_model), dispatcher.box_clone());
+        let root_nav: libadwaita::NavigationView = builder.object("root_nav").unwrap();
+        let tab_stack: libadwaita::ViewStack = builder.object("tab_stack").unwrap();
         // This is where components that are not created initially will be assembled
-        let screen_factory =
-            ScreenFactory::new(Rc::clone(&app_model), dispatcher.box_clone(), worker);
-        Box::new(Navigation::new(
-            model,
-            split_view,
-            navigation_stack,
-            home_listbox,
-            screen_factory,
-        ))
+        let screen_factory = ScreenFactory::new(app_model, dispatcher, worker);
+        Box::new(Navigation::new(root_nav, tab_stack, screen_factory))
     }
 
     fn make_login(builder: &gtk::Builder, dispatcher: Box<dyn ActionDispatcher>) -> Box<Login> {
@@ -249,14 +225,6 @@ impl App {
         Box::new(NowPlayingSheet::new(model, sheet, widget, worker))
     }
 
-    fn make_search_button(
-        builder: &gtk::Builder,
-        dispatcher: Box<dyn ActionDispatcher>,
-    ) -> Box<SearchButton> {
-        let search_button: gtk::Button = builder.object("search_button").unwrap();
-        let model = SearchBarModel(dispatcher);
-        Box::new(SearchButton::new(model, search_button))
-    }
 
     fn make_user_menu(
         builder: &gtk::Builder,

@@ -27,6 +27,7 @@ pub enum AppAction {
     ShowNotification(String),
     ViewNowPlaying,
     ShowNowPlayingSheet,
+    ShowSearchTab,
     // Cross-state actions
     QueueSelection,
     DequeueSelection,
@@ -90,7 +91,7 @@ impl AppAction {
 
     #[allow(non_snake_case)]
     pub fn ViewSearch() -> Self {
-        BrowserAction::NavigationPush(ScreenName::Search).into()
+        AppAction::ShowSearchTab
     }
 }
 
@@ -108,6 +109,7 @@ pub enum AppEvent {
     PlaylistCreatedNotificationShown(String),
     NowPlayingShown,
     NowPlayingSheetShown,
+    SearchTabShown,
     SettingsEvent(SettingsEvent),
 }
 
@@ -144,6 +146,7 @@ impl AppState {
             AppAction::ShowNotification(c) => vec![AppEvent::NotificationShown(c)],
             AppAction::ViewNowPlaying => vec![AppEvent::NowPlayingShown],
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
+            AppAction::ShowSearchTab => vec![AppEvent::SearchTabShown],
             AppAction::Raise => vec![AppEvent::Raised],
             // Cross-state actions: multiple "substates" are affected by these actions, that's why they're handled here
             // Might need some clean-up

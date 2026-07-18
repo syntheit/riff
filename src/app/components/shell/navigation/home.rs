@@ -1,78 +1,80 @@
+use gettextrs::gettext;
 use gtk::prelude::*;
 
-use crate::app::components::sidebar::SidebarDestination;
 use crate::app::components::{Component, EventListener, ScreenFactory};
-use crate::app::{AppEvent, BrowserEvent};
+use crate::app::AppEvent;
 
-pub struct HomePane {
-    stack: gtk::Stack,
+// The Library tab: the user's saved content split into filter tabs
+// (Playlists / Albums / Artists / Liked), switched by a header AdwViewSwitcher.
+// Replaces the old sidebar-driven master/detail.
+pub struct LibraryPane {
+    container: gtk::Box,
     components: Vec<Box<dyn EventListener>>,
 }
 
-impl HomePane {
-    pub fn new(listbox: gtk::ListBox, screen_factory: &ScreenFactory) -> Self {
-        let library = screen_factory.make_library();
-        let saved_playlists = screen_factory.make_saved_playlists();
-        let saved_tracks = screen_factory.make_saved_tracks();
-        let saved_artists = screen_factory.make_saved_artists();
-        let now_playing = screen_factory.make_now_playing();
-        let sidebar = screen_factory.make_sidebar(listbox);
+impl LibraryPane {
+    pub fn new(screen_factory: &ScreenFactory) -> Self {
+        let playlists = screen_factory.make_saved_playlists();
+        let albums = screen_factory.make_library();
+        let artists = screen_factory.make_saved_artists();
+        let liked = screen_factory.make_saved_tracks();
 
-        let stack = gtk::Stack::new();
-        stack.set_transition_type(gtk::StackTransitionType::Crossfade);
-
-        let dest = SidebarDestination::Library;
-        stack.add_titled(
-            library.get_root_widget(),
-            Option::from(dest.id()),
-            &dest.title(),
+        let stack = libadwaita::ViewStack::new();
+        stack.set_vexpand(true);
+        stack.add_titled_with_icon(
+            playlists.get_root_widget(),
+            Some("playlists"),
+            &gettext("Playlists"),
+            "view-app-grid-symbolic",
+        );
+        stack.add_titled_with_icon(
+            albums.get_root_widget(),
+            Some("albums"),
+            &gettext("Albums"),
+            "library-music-symbolic",
+        );
+        stack.add_titled_with_icon(
+            artists.get_root_widget(),
+            Some("artists"),
+            &gettext("Artists"),
+            "avatar-default-symbolic",
+        );
+        stack.add_titled_with_icon(
+            liked.get_root_widget(),
+            Some("liked"),
+            &gettext("Liked Songs"),
+            "starred-symbolic",
         );
 
-        let dest = SidebarDestination::SavedTracks;
-        stack.add_titled(
-            saved_tracks.get_root_widget(),
-            Option::from(dest.id()),
-            &dest.title(),
-        );
+        // A filter-chip row (not a full header) above the section, so the tab
+        // doesn't stack multiple headerbars.
+        let switcher = libadwaita::ViewSwitcher::builder()
+            .stack(&stack)
+            .policy(libadwaita::ViewSwitcherPolicy::Wide)
+            .halign(gtk::Align::Center)
+            .margin_top(6)
+            .margin_bottom(6)
+            .build();
 
-        let dest = SidebarDestination::SavedPlaylists;
-        stack.add_titled(
-            saved_playlists.get_root_widget(),
-            Option::from(dest.id()),
-            &dest.title(),
-        );
-
-        let dest = SidebarDestination::SavedArtists;
-        stack.add_titled(
-            saved_artists.get_root_widget(),
-            Option::from(dest.id()),
-            &dest.title(),
-        );
-
-        let dest = SidebarDestination::NowPlaying;
-        stack.add_titled(
-            now_playing.get_root_widget(),
-            Option::from(dest.id()),
-            &dest.title(),
-        );
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        container.append(&switcher);
+        container.append(&stack);
 
         Self {
-            stack,
+            container,
             components: vec![
-                Box::new(sidebar),
-                Box::new(library),
-                Box::new(saved_playlists),
-                Box::new(saved_tracks),
-                Box::new(saved_artists),
-                Box::new(now_playing),
+                Box::new(playlists),
+                Box::new(albums),
+                Box::new(artists),
+                Box::new(liked),
             ],
         }
     }
 }
 
-impl Component for HomePane {
+impl Component for LibraryPane {
     fn get_root_widget(&self) -> &gtk::Widget {
-        self.stack.upcast_ref()
+        self.container.upcast_ref()
     }
 
     fn get_children(&mut self) -> Option<&mut Vec<Box<dyn EventListener>>> {
@@ -80,18 +82,8 @@ impl Component for HomePane {
     }
 }
 
-impl EventListener for HomePane {
+impl EventListener for LibraryPane {
     fn on_event(&mut self, event: &AppEvent) {
-        match event {
-            AppEvent::NowPlayingShown => {
-                self.stack
-                    .set_visible_child_name(SidebarDestination::NowPlaying.id());
-            }
-            AppEvent::BrowserEvent(BrowserEvent::HomeVisiblePageChanged(page)) => {
-                self.stack.set_visible_child_name(page);
-            }
-            _ => {}
-        }
         self.broadcast_event(event);
     }
 }

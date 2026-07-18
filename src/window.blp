@@ -5,17 +5,9 @@ Adw.ApplicationWindow window {
   default-width: 1080;
   default-height: 720;
 
-  Adw.Breakpoint {
-    condition("max-width:550sp")
-
-    setters {
-      split_view.collapsed: true;
-    }
-  }
-
   Adw.BottomSheet now_playing_sheet {
-    // Non-modal so the window's ShortcutController (space to play/pause, etc.)
-    // keeps working while the sheet is open; the sheet covers the content anyway.
+    // Non-modal so the window's ShortcutController keeps working while the sheet
+    // is open; the sheet covers the content anyway.
     modal: false;
 
     content: Box {
@@ -55,75 +47,45 @@ Adw.ApplicationWindow window {
         }
       }
 
-      Adw.NavigationSplitView split_view {
+      Adw.ToastOverlay main {
+        hexpand: true;
         vexpand: true;
 
-        sidebar: Adw.NavigationPage {
-          title: "Sidebar";
+        // One navigation view for the whole app: the tab shell is its root page;
+        // album/artist/playlist/user detail pages push on top (with swipe-back).
+        Adw.NavigationView root_nav {
+          Adw.NavigationPage {
+            title: _("Riff");
+            tag: "tabs";
+            can-pop: false;
 
-          child: Box {
-            orientation: vertical;
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {
+                show-title: false;
 
-            Adw.HeaderBar {
-              styles ["flat"]
-
-              Button search_button {
-                icon-name: "system-search-symbolic";
-                focus-on-click: false;
-                can-focus: false;
+                [end]
+                MenuButton user {
+                  icon-name: "open-menu-symbolic";
+                  focus-on-click: false;
+                  can-focus: false;
+                }
               }
 
-              ToggleButton skeleton_toggle {
-                icon-name: "checkbox-mixed-symbolic";
-                focus-on-click: false;
-                can-focus: false;
-                visible: false;
-              }
-
-              [title]
-              Adw.WindowTitle {
-                title: "Riff";
-              }
-
-              [end]
-              MenuButton user {
-                icon-name: "open-menu-symbolic";
-                focus-on-click: false;
-                can-focus: false;
-              }
-            }
-
-            ScrolledWindow {
-              hscrollbar-policy: never;
-              ListBox home_listbox {
-                width-request: 200;
+              // The three tabs. Pages are populated in Rust (Navigation) so the
+              // existing screen components can be reused unchanged.
+              content: Adw.ViewStack tab_stack {
                 vexpand: true;
+              };
 
-                styles [
-                  "navigation-sidebar",
-                ]
+              [bottom]
+              Adw.ViewSwitcherBar tab_bar {
+                stack: tab_stack;
+                reveal: true;
               }
-            }
-          };
-        };
-
-        content: Adw.NavigationPage {
-          tag: "main";
-          title: "Home";
-
-          child: Box {
-            orientation: vertical;
-
-            Adw.ToastOverlay main {
-              hexpand: true;
-              vexpand: true;
-
-              Stack navigation_stack {
-                transition-type: slide_left_right;
-              }
-            }
-          };
-        };
+            };
+          }
+        }
       }
     };
 
