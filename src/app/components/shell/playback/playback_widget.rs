@@ -1,35 +1,49 @@
+use gio::{Menu, SimpleAction, SimpleActionGroup};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, CompositeTemplate};
+use std::cell::RefCell;
 
 use crate::app::components::display_add_css_provider;
 use crate::app::components::utils::{format_duration, Clock, Debouncer};
 use crate::app::loader::ImageLoader;
-use crate::app::models::RepeatMode;
+use crate::app::models::{PlaylistSummary, RepeatMode};
 use crate::app::Worker;
 
 use super::playback_controls::PlaybackControlsWidget;
 use super::playback_info::PlaybackInfoWidget;
-use super::playback_info_mobile::PlaybackInfoMobileWidget;
 
 mod imp {
 
     use super::*;
 
-    #[derive(Debug, Default, CompositeTemplate)]
+    #[derive(Default, CompositeTemplate)]
     #[template(resource = "/dev/diegovsky/Riff/components/playback_widget.ui")]
     pub struct PlaybackWidget {
         #[template_child]
         pub controls: TemplateChild<PlaybackControlsWidget>,
 
         #[template_child]
-        pub mobile_controls: TemplateChild<PlaybackControlsWidget>,
-
-        #[template_child]
         pub now_playing: TemplateChild<PlaybackInfoWidget>,
 
+        // Mobile mini-player strip.
         #[template_child]
-        pub mobile_now_playing: TemplateChild<PlaybackInfoMobileWidget>,
+        pub mobile_bar: TemplateChild<gtk::Box>,
+
+        #[template_child]
+        pub mobile_art: TemplateChild<gtk::Image>,
+
+        #[template_child]
+        pub mobile_title: TemplateChild<gtk::Label>,
+
+        #[template_child]
+        pub mobile_artist: TemplateChild<gtk::Label>,
+
+        #[template_child]
+        pub mobile_add: TemplateChild<gtk::MenuButton>,
+
+        #[template_child]
+        pub mobile_play_pause: TemplateChild<gtk::Button>,
 
         #[template_child]
         pub seek_bar: TemplateChild<gtk::Scale>,
@@ -47,6 +61,12 @@ mod imp {
         pub volume_slider: TemplateChild<gtk::Scale>,
 
         pub clock: Clock,
+
+        // Gesture callbacks on the mini-player: horizontal swipe = skip, and a
+        // tap (with no drag) opens the now-playing sheet.
+        pub next_cb: RefCell<Option<Box<dyn Fn()>>>,
+        pub prev_cb: RefCell<Option<Box<dyn Fn()>>>,
+        pub open_cb: RefCell<Option<Box<dyn Fn()>>>,
     }
 
     #[glib::object_subclass]
@@ -94,6 +114,52 @@ mod imp {
                 }
             ));
             self.seek_overlay.add_controller(motion);
+
+            // Horizontal swipe on the mini-player = next/previous.
+            let swipe = gtk::GestureSwipe::new();
+            swipe.connect_swipe(clone!(
+                #[weak(rename_to = widget)]
+                self,
+                move |_, vel_x, vel_y| {
+                    if vel_x.abs() < 200.0 || vel_x.abs() <= vel_y.abs() {
+                        return;
+                    }
+                    let cb = if vel_x < 0.0 {
+                        widget.next_cb.borrow()
+                    } else {
+                        widget.prev_cb.borrow()
+                    };
+                    if let Some(cb) = cb.as_ref() {
+                        cb();
+                    }
+                }
+            ));
+            self.mobile_bar.add_controller(swipe);
+
+            // A tap (no horizontal drag) opens the now-playing sheet. GestureSwipe
+            // doesn't claim the sequence, so we guard the click by drag distance
+            // rather than grouping — a swipe moves the pointer and won't open it.
+            let click = gtk::GestureClick::new();
+            let press_x = std::rc::Rc::new(std::cell::Cell::new(0.0f64));
+            click.connect_pressed(clone!(
+                #[strong]
+                press_x,
+                move |_, _, x, _| press_x.set(x)
+            ));
+            click.connect_released(clone!(
+                #[weak(rename_to = widget)]
+                self,
+                #[strong]
+                press_x,
+                move |_, _, x, _| {
+                    if (x - press_x.get()).abs() < 10.0 {
+                        if let Some(cb) = widget.open_cb.borrow().as_ref() {
+                            cb();
+                        }
+                    }
+                }
+            ));
+            self.mobile_bar.add_controller(click);
         }
     }
 
@@ -110,24 +176,26 @@ impl PlaybackWidget {
         let widget = self.imp();
         widget.now_playing.set_visible(true);
         widget.now_playing.set_title_and_artist(title, artist);
-        widget.mobile_now_playing.set_visible(true);
-        widget
-            .mobile_now_playing
-            .set_title_and_artist(title, artist);
+        widget.mobile_title.set_text(title);
+        widget.mobile_artist.set_text(artist);
     }
 
+    #[allow(deprecated)] // Image::set_from_pixbuf
     pub fn reset_info(&self) {
         let widget = self.imp();
         widget.now_playing.set_visible(false);
         widget.now_playing.reset_info();
-        widget.mobile_now_playing.set_visible(false);
-        widget.mobile_now_playing.reset_info();
+        widget.mobile_title.set_text("");
+        widget.mobile_artist.set_text("");
+        widget.mobile_art.set_from_pixbuf(None);
         self.set_song_duration(None);
     }
 
+    #[allow(deprecated)] // Image::set_from_pixbuf — no set_from_paintable in this binding
     fn set_artwork(&self, image: &gdk_pixbuf::Pixbuf) {
         let widget = self.imp();
         widget.now_playing.set_artwork(image);
+        widget.mobile_art.set_from_pixbuf(Some(image));
     }
 
     pub fn set_artwork_from_url(&self, url: String, worker: &Worker) {
@@ -178,9 +246,44 @@ impl PlaybackWidget {
         F: Fn() + Clone + 'static,
     {
         let widget = self.imp();
-        let f_clone = f.clone();
-        widget.now_playing.connect_clicked(move |_| f_clone());
-        widget.mobile_now_playing.connect_clicked(move || f());
+        let f_desktop = f.clone();
+        widget.now_playing.connect_clicked(move |_| f_desktop());
+        widget.open_cb.replace(Some(Box::new(f)));
+    }
+
+    /// Populate the mini-player's "add to playlist" menu with the user's playlists.
+    pub fn connect_add_playlists<F>(&self, playlists: &[PlaylistSummary], on_selected: F)
+    where
+        F: Fn(&str) + Clone + 'static,
+    {
+        // Don't rebuild the menu while it's open (playlists can change elsewhere).
+        if self
+            .imp()
+            .mobile_add
+            .popover()
+            .is_some_and(|p| p.is_visible())
+        {
+            return;
+        }
+        let menu = Menu::new();
+        let action_group = SimpleActionGroup::new();
+        for PlaylistSummary { title, id } in playlists {
+            let action_name = format!("playlist_{id}");
+            action_group.add_action(&{
+                let id = id.clone();
+                let action = SimpleAction::new(&action_name, None);
+                let f = on_selected.clone();
+                action.connect_activate(move |_, _| f(&id));
+                action
+            });
+            menu.append(Some(title), Some(&format!("add_to.{action_name}")));
+        }
+        let popover = gtk::PopoverMenu::from_model(Some(&menu));
+        let widget = self.imp();
+        widget.mobile_add.set_popover(Some(&popover));
+        widget
+            .mobile_add
+            .insert_action_group("add_to", Some(&action_group));
     }
 
     pub fn connect_seek<Seek>(&self, seek: Seek)
@@ -208,7 +311,11 @@ impl PlaybackWidget {
     pub fn set_playing(&self, is_playing: bool) {
         let widget = self.imp();
         widget.controls.set_playing(is_playing);
-        widget.mobile_controls.set_playing(is_playing);
+        widget.mobile_play_pause.set_icon_name(if is_playing {
+            "media-playback-pause-symbolic"
+        } else {
+            "media-playback-start-symbolic"
+        });
         if is_playing {
             widget.clock.start(clone!(
                 #[weak(rename_to = _self)]
@@ -221,15 +328,11 @@ impl PlaybackWidget {
     }
 
     pub fn set_repeat_mode(&self, mode: RepeatMode) {
-        let widget = self.imp();
-        widget.controls.set_repeat_mode(mode);
-        widget.mobile_controls.set_repeat_mode(mode);
+        self.imp().controls.set_repeat_mode(mode);
     }
 
     pub fn set_shuffled(&self, shuffled: bool) {
-        let widget = self.imp();
-        widget.controls.set_shuffled(shuffled);
-        widget.mobile_controls.set_shuffled(shuffled);
+        self.imp().controls.set_shuffled(shuffled);
     }
 
     pub fn set_seekbar_visible(&self, visible: bool) {
@@ -248,43 +351,37 @@ impl PlaybackWidget {
     {
         let widget = self.imp();
         widget.controls.connect_play_pause(f.clone());
-        widget.mobile_controls.connect_play_pause(f);
+        widget.mobile_play_pause.connect_clicked(move |_| f());
     }
 
     pub fn connect_prev<F>(&self, f: F)
     where
         F: Fn() + Clone + 'static,
     {
-        let widget = self.imp();
-        widget.controls.connect_prev(f.clone());
-        widget.mobile_controls.connect_prev(f);
+        self.imp().controls.connect_prev(f.clone());
+        self.imp().prev_cb.replace(Some(Box::new(f)));
     }
 
     pub fn connect_next<F>(&self, f: F)
     where
         F: Fn() + Clone + 'static,
     {
-        let widget = self.imp();
-        widget.controls.connect_next(f.clone());
-        widget.mobile_controls.connect_next(f);
+        self.imp().controls.connect_next(f.clone());
+        self.imp().next_cb.replace(Some(Box::new(f)));
     }
 
     pub fn connect_shuffle<F>(&self, f: F)
     where
         F: Fn() + Clone + 'static,
     {
-        let widget = self.imp();
-        widget.controls.connect_shuffle(f.clone());
-        widget.mobile_controls.connect_shuffle(f);
+        self.imp().controls.connect_shuffle(f);
     }
 
     pub fn connect_repeat<F>(&self, f: F)
     where
         F: Fn() + Clone + 'static,
     {
-        let widget = self.imp();
-        widget.controls.connect_repeat(f.clone());
-        widget.mobile_controls.connect_repeat(f);
+        self.imp().controls.connect_repeat(f);
     }
 
     pub fn connect_volume_changed<F>(&self, f: F)

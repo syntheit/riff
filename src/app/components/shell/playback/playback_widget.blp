@@ -149,52 +149,76 @@ template $PlaybackWidget : Box {
 
       StackPage {
         name: "mobile";
-        child: Box {
-          orientation: vertical;
-          halign: fill;
-          hexpand: true;
+        child: Box mobile_bar {
+          spacing: 10;
+          margin-start: 12;
+          margin-end: 6;
+          margin-top: 4;
+          margin-bottom: 4;
 
-          $PlaybackInfoMobileWidget mobile_now_playing {
-            visible: false;
-            hexpand: true;
+          styles [
+            "mini-player",
+          ]
+
+          Image mobile_art {
+            pixel-size: 44;
+            valign: center;
 
             styles [
-              "mobile-now-playing",
+              "mini-player-art",
             ]
           }
 
           Box {
+            orientation: vertical;
+            valign: center;
             hexpand: true;
-            margin-top: 8;
-            margin-bottom: 8;
-            margin-start: 8;
-            margin-end: 8;
 
-            $PlaybackControlsWidget mobile_controls {
-              halign: center;
-              valign: center;
-              hexpand: true;
-            }
+            Label mobile_title {
+              ellipsize: end;
+              xalign: 0;
+              single-line-mode: true;
 
-            MenuButton {
-              icon-name: 'multimedia-volume-control-symbolic';
-              halign: end;
-              valign: center;
-              direction: up;
-              focus-on-click: false;
-              can-focus: false;
               styles [
-                "flat"
+                "heading",
               ]
-              popover: Popover {
-                child: Scale {
-                  inverted: true;
-                  orientation: vertical;
-                  height-request: 160;
-                  adjustment: bind volume_slider.adjustment;
-                };
-              };
             }
+
+            Label mobile_artist {
+              ellipsize: end;
+              xalign: 0;
+              single-line-mode: true;
+
+              styles [
+                "caption",
+                "dim-label",
+              ]
+            }
+          }
+
+          MenuButton mobile_add {
+            icon-name: "list-add-symbolic";
+            valign: center;
+            focus-on-click: false;
+            can-focus: false;
+            tooltip-text: _("Add to playlist");
+
+            styles [
+              "flat",
+              "circular",
+            ]
+          }
+
+          Button mobile_play_pause {
+            icon-name: "media-playback-start-symbolic";
+            valign: center;
+            focus-on-click: false;
+            can-focus: false;
+
+            styles [
+              "flat",
+              "circular",
+            ]
           }
         };
       }

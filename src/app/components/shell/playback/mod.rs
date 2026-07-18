@@ -3,7 +3,6 @@ mod now_playing_full;
 mod now_playing_sheet;
 mod playback_controls;
 mod playback_info;
-mod playback_info_mobile;
 mod playback_widget;
 pub use component::*;
 pub use now_playing_full::NowPlayingFullWidget;

@@ -65,3 +65,7 @@
 .now-playing-art {
   border-radius: 12px;
 }
+
+.mini-player-art {
+  border-radius: 4px;
+}
