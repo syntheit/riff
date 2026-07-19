@@ -389,7 +389,7 @@ impl SpotifyClient {
             .append_pair("market", "from_token")
             // why still grab the tracks field?
             // the model still expects the appearance of a tracks field
-            .append_pair("fields", "id,name,images,owner,tracks(total)")
+            .append_pair("fields", "id,name,images,owner,snapshot_id,tracks(total)")
             .finish();
         self.request()
             .method(Method::GET)
@@ -404,6 +404,23 @@ impl SpotifyClient {
     ) -> SpotifyRequest<'_, (), Page<PlaylistTrack>> {
         let query = make_query_params()
             .append_pair("market", "from_token")
+            .append_pair("offset", &offset.to_string()[..])
+            .append_pair("limit", &limit.to_string()[..])
+            .finish();
+
+        self.request()
+            .method(Method::GET)
+            .uri(format!("/v1/playlists/{id}/tracks"), Some(&query))
+    }
+
+    pub(crate) fn get_playlist_track_ids(
+        &self,
+        id: &str,
+        offset: usize,
+        limit: usize,
+    ) -> SpotifyRequest<'_, (), Page<PlaylistTrackId>> {
+        let query = make_query_params()
+            .append_pair("fields", "items(track(id)),total,limit,offset")
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])
             .finish();

@@ -175,6 +175,7 @@ pub struct Playlist {
     pub images: Option<Vec<Image>>,
     pub tracks: Page<PlaylistTrack>,
     pub owner: PlaylistOwner,
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -202,6 +203,17 @@ impl WithImages for Playlist {
 pub struct PlaylistTrack {
     pub is_local: bool,
     pub track: Option<FailibleTrackItem>,
+}
+
+// Minimal track item used when only the id is needed (fields-filtered endpoint).
+#[derive(Deserialize, Debug, Clone)]
+pub struct PlaylistTrackId {
+    pub track: Option<PlaylistTrackIdInner>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct PlaylistTrackIdInner {
+    pub id: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -635,6 +647,7 @@ impl From<Playlist> for PlaylistDescription {
             name,
             tracks,
             owner,
+            snapshot_id,
             ..
         } = playlist;
         let PlaylistOwner {
@@ -651,6 +664,7 @@ impl From<Playlist> for PlaylistDescription {
                 id: owner_id,
                 display_name,
             },
+            snapshot_id,
         }
     }
 }

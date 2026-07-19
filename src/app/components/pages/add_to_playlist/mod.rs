@@ -2,9 +2,11 @@ use gettextrs::gettext;
 use gtk::prelude::*;
 use libadwaita::prelude::BinExt;
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
+use crate::api::SpotifyApiClient;
 use crate::app::components::{Component, EventListener};
 use crate::app::loader::ImageLoader;
 use crate::app::models::{ImageSet, PlaylistDescription, SongDescription};
@@ -16,11 +18,19 @@ fn set_sheet_open(sheet: &gtk::Widget, open: bool) {
 }
 
 // Which order the playlist list is displayed in.
+// Spotify's /me/playlists returns no per-playlist timestamps, so only
+// Alphabetical and the raw API order (which approximates recent activity) are honest.
 #[derive(Clone, Copy, PartialEq, Default)]
 enum SortMode {
     #[default]
     Alphabetical,
-    FetchOrder,
+    Default,
+}
+
+// Per-playlist membership index entry. Keyed by playlist id.
+struct PlaylistIndexEntry {
+    snapshot_id: String,
+    track_ids: HashSet<String>,
 }
 
 pub struct AddToPlaylistModel {
@@ -46,8 +56,6 @@ impl AddToPlaylistModel {
             .iter()
             .map(|card| {
                 let id = card.id();
-                // Use the full PlaylistDescription if it's already in the browser
-                // (gives us songs for "Saved in" detection and higher-res art).
                 if let Some(pds) = browser.playlist_details_state(&id) {
                     if let Some(pl) = pds.playlist.as_ref() {
                         return pl.clone();
@@ -67,6 +75,7 @@ impl AddToPlaylistModel {
                         id: String::new(),
                         display_name: String::new(),
                     },
+                    snapshot_id: card.snapshot_id(),
                 }
             })
             .collect()
@@ -118,17 +127,21 @@ pub struct AddToPlaylist {
     sheet: gtk::Widget,
     host: libadwaita::Bin,
     current_song: RefCell<Option<SongDescription>>,
-    /// Pending adds: playlist ids the user has checked during this session.
-    /// Persists across build_for() rebuilds (e.g. after UserPlaylistsLoaded).
-    /// Cleared only when opening the drawer for a new song.
+    /// Pending adds: playlist ids checked during this session.
+    /// Persists across build_for() rebuilds. Cleared only for a new song.
     staged_adds: Rc<RefCell<HashSet<String>>>,
-    /// Pending removes: playlist ids the user has unchecked during this session.
-    /// Same lifetime as staged_adds.
+    /// Pending removes: playlist ids unchecked during this session.
     staged_removes: Rc<RefCell<HashSet<String>>>,
-    /// All playlist ids seen at the last build_for() call. Used to detect
-    /// newly-created playlists on UserPlaylistsLoaded so they can be
-    /// auto-staged as adds (Spotify creates and immediately adds the song).
+    /// Playlist ids seen at the last build_for() call. Used to detect
+    /// newly-created playlists (via UserPlaylistsLoaded) for auto-staging.
     known_playlist_ids: RefCell<HashSet<String>>,
+    /// Snapshot-id-keyed track membership index. Persists across songs so
+    /// unchanged playlists are never re-fetched within an app session.
+    membership_index: Rc<RefCell<HashMap<String, PlaylistIndexEntry>>>,
+    /// Monotonically increasing counter bumped each time the drawer opens for
+    /// a new song. Background refresh tasks carry the token they were launched
+    /// with; if it no longer matches, the result is discarded.
+    session_token: Rc<Cell<u64>>,
 }
 
 impl AddToPlaylist {
@@ -147,397 +160,510 @@ impl AddToPlaylist {
             staged_adds: Rc::new(RefCell::new(HashSet::new())),
             staged_removes: Rc::new(RefCell::new(HashSet::new())),
             known_playlist_ids: RefCell::new(HashSet::new()),
+            membership_index: Rc::new(RefCell::new(HashMap::new())),
+            session_token: Rc::new(Cell::new(0)),
         }
     }
 
     fn build_for(&self, song: &SongDescription) {
-        let model = &self.model;
-        let worker = &self.worker;
-        let sheet = self.sheet.clone();
+        let playlists = self.model.user_playlists();
 
-        // ── Staging (shared, persists across rebuilds) ────────────────────────
-        // staged_adds/staged_removes live on self; we clone the Rc handles so
-        // closures below keep them alive. They are NOT reset here — clearing
-        // happens only in on_event when a new song is targeted.
-        let staged_adds = self.staged_adds.clone();
-        let staged_removes = self.staged_removes.clone();
-
-        // ── Initial "contains this song" set ─────────────────────────────────
-        // Best-effort: only playlists whose tracks are already loaded in the browser.
-        // No fetch is performed.
-        let song_id = song.id.clone();
-        let song_uri = song.uri.clone();
-        let playlists = model.user_playlists();
-
-        // Update known_playlist_ids and auto-stage any brand-new playlists.
+        // Detect newly-created playlists and auto-stage them as adds.
+        // On the very first build_for for a song, known_playlist_ids has already
+        // been seeded with the current ids (done in on_event before calling here),
+        // so nothing is treated as "new" until the user actually creates one.
         {
             let current_ids: HashSet<String> = playlists.iter().map(|p| p.id.clone()).collect();
             let mut known = self.known_playlist_ids.borrow_mut();
-            // Any id present now but absent before is a newly-created playlist.
-            // Auto-stage it as an add so it appears checked and Save adds the song.
             for new_id in current_ids.difference(&*known) {
-                staged_adds.borrow_mut().insert(new_id.clone());
+                self.staged_adds.borrow_mut().insert(new_id.clone());
             }
             *known = current_ids;
         }
 
-        let initially_contains: HashSet<String> = playlists
-            .iter()
-            .filter(|p| p.songs.songs.iter().any(|s| s.id == song_id))
-            .map(|p| p.id.clone())
-            .collect();
-
-        // ── Sort state ───────────────────────────────────────────────────────
-        let sort_mode: Rc<Cell<SortMode>> = Rc::new(Cell::new(SortMode::Alphabetical));
-
-        // ── Root layout ──────────────────────────────────────────────────────
-        let root = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .build();
-
-        // Header bar
-        let header_bar = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(0)
-            .margin_top(20)
-            .margin_start(16)
-            .margin_end(16)
-            .margin_bottom(8)
-            .build();
-
-        let cancel_btn = gtk::Button::builder()
-            .label(gettext("Cancel"))
-            .css_classes(["flat"])
-            .build();
-        let title_label = gtk::Label::builder()
-            .label(gettext("Add to playlist"))
-            .hexpand(true)
-            .halign(gtk::Align::Center)
-            .css_classes(["title-4"])
-            .build();
-        let save_btn = gtk::Button::builder()
-            .label(gettext("Save"))
-            .css_classes(["suggested-action"])
-            .build();
-
-        header_bar.append(&cancel_btn);
-        header_bar.append(&title_label);
-        header_bar.append(&save_btn);
-        root.append(&header_bar);
-
-        // Track card
-        let track_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
-            .margin_top(8)
-            .margin_bottom(8)
-            .margin_start(16)
-            .margin_end(16)
-            .build();
-        track_row.append(&art_thumbnail(song.art.as_ref(), worker));
-        track_row.append(&song_text_box(&song.title, &song.artists_name()));
-        root.append(&track_row);
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-        // Search + sort toolbar
-        let toolbar = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(8)
-            .margin_top(8)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_bottom(4)
-            .build();
-        let search_entry = gtk::SearchEntry::builder()
-            .placeholder_text(gettext("Find a playlist"))
-            .hexpand(true)
-            .build();
-        // Sort: Alphabetical / Recently updated / Recently added.
-        // "Recently updated" and "Recently added" both use API fetch order because
-        // Spotify's playlists list endpoint returns no per-playlist timestamps.
-        let sort_strings = gtk::StringList::new(&[
-            &gettext("Alphabetical"),
-            &gettext("Recently updated"),
-            &gettext("Recently added"),
-        ]);
-        let sort_drop = gtk::DropDown::builder()
-            .model(&sort_strings)
-            .selected(0)
-            .build();
-        toolbar.append(&search_entry);
-        toolbar.append(&sort_drop);
-        root.append(&toolbar);
-
-        // Scrollable list
-        let list_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .margin_start(12)
-            .margin_end(12)
-            .margin_top(4)
-            .margin_bottom(24)
-            .build();
-        let clamp = libadwaita::Clamp::builder()
-            .maximum_size(600)
-            .child(&list_box)
-            .build();
-        let scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vexpand(true)
-            .child(&clamp)
-            .build();
-        root.append(&scroll);
-
-        // ── "New playlist" row ────────────────────────────────────────────────
-        let new_row = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
-            .margin_top(4)
-            .margin_bottom(4)
-            .build();
-        let new_icon = gtk::Image::builder()
-            .icon_name("list-add-symbolic")
-            .pixel_size(32)
-            .margin_start(8)
-            .margin_end(8)
-            .build();
-        let new_label = gtk::Label::builder()
-            .label(gettext("New playlist"))
-            .hexpand(true)
-            .xalign(0.0)
-            .build();
-        let name_entry = gtk::Entry::builder()
-            .placeholder_text(gettext("Playlist name"))
-            .hexpand(true)
-            .visible(false)
-            .build();
-        let confirm_btn = gtk::Button::builder()
-            .icon_name("object-select-symbolic")
-            .css_classes(["flat", "circular"])
-            .valign(gtk::Align::Center)
-            .visible(false)
-            .build();
-        new_row.append(&new_icon);
-        new_row.append(&new_label);
-        new_row.append(&name_entry);
-        new_row.append(&confirm_btn);
-
-        let new_btn = gtk::Button::builder()
-            .child(&new_row)
-            .css_classes(["flat"])
-            .build();
-
-        // Toggle inline entry on tap
-        let entry_ref = name_entry.clone();
-        let confirm_ref2 = confirm_btn.clone();
-        let label_ref = new_label.clone();
-        new_btn.connect_clicked(move |_| {
-            let showing = gtk::prelude::WidgetExt::is_visible(&entry_ref);
-            entry_ref.set_visible(!showing);
-            confirm_ref2.set_visible(!showing);
-            label_ref.set_visible(showing);
-            if !showing {
-                entry_ref.grab_focus();
-            }
-        });
-
-        list_box.append(&new_btn);
-        list_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-
-        // ── "Saved in" section (best-effort, loaded data only) ────────────────
-        // TODO: If track membership were known without pre-loading playlist tracks,
-        // this section could be populated for all playlists. Currently limited to
-        // those whose track list is already in the browser's playlist_details_state.
-        if !initially_contains.is_empty() {
-            let saved_label = gtk::Label::builder()
-                .label(gettext("Saved in"))
-                .xalign(0.0)
-                .margin_top(8)
-                .margin_bottom(4)
-                .css_classes(["heading"])
-                .build();
-            list_box.append(&saved_label);
-            for pl in playlists
+        // Membership comes from the snapshot-id-cached index. Playlists not yet
+        // indexed show as not-containing the song until the background refresh
+        // completes and triggers a rebuild.
+        let initially_contains: HashSet<String> = {
+            let index = self.membership_index.borrow();
+            playlists
                 .iter()
-                .filter(|p| initially_contains.contains(&p.id))
-            {
-                let row = playlist_row(
-                    pl,
-                    true,
-                    worker,
-                    staged_adds.clone(),
-                    staged_removes.clone(),
-                    &initially_contains,
-                );
-                list_box.append(&row);
-            }
-            let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-            sep.set_margin_top(8);
-            sep.set_margin_bottom(4);
-            list_box.append(&sep);
+                .filter(|p| {
+                    index
+                        .get(&p.id)
+                        .is_some_and(|e| e.track_ids.contains(&song.id))
+                })
+                .map(|p| p.id.clone())
+                .collect()
+        };
+
+        build_drawer_ui(
+            song,
+            &playlists,
+            initially_contains,
+            &self.sheet,
+            &self.host,
+            &self.model,
+            &self.worker,
+            &self.staged_adds,
+            &self.staged_removes,
+        );
+    }
+
+    /// Kick off a background refresh of the membership index.
+    /// For each playlist, re-fetches track ids only when snapshot_id changed
+    /// (or the playlist has no entry yet). Unchanged playlists are free.
+    /// Discards the result if the session token changed (drawer re-targeted).
+    /// Does NOT touch staged_adds/staged_removes.
+    fn refresh_membership_index(
+        &self,
+        song: SongDescription,
+        playlists: Vec<PlaylistDescription>,
+        api: Arc<dyn SpotifyApiClient + Send + Sync>,
+    ) {
+        let index_rc = self.membership_index.clone();
+        let session_token = self.session_token.clone();
+        let my_token = session_token.get();
+        let sheet = self.sheet.clone();
+
+        // host is the Bin that contains the drawer root built by build_for.
+        // After the refresh we call build_drawer_ui again; to do that without a
+        // self reference in the async block we store the inputs we need.
+        let model_rc = self.model.clone();
+        let worker = self.worker.clone();
+        let host = self.host.clone();
+        let staged_adds = self.staged_adds.clone();
+        let staged_removes = self.staged_removes.clone();
+
+        // Collect which playlists need re-fetching before entering the async block.
+        let to_fetch: Vec<(String, String)> = {
+            let index = index_rc.borrow();
+            playlists
+                .iter()
+                .filter_map(|p| {
+                    let snap = p.snapshot_id.as_deref()?;
+                    let needs_fetch = index.get(&p.id).is_none_or(|e| e.snapshot_id != snap);
+                    if needs_fetch {
+                        Some((p.id.clone(), snap.to_owned()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        };
+
+        if to_fetch.is_empty() {
+            return;
         }
 
-        // ── Filtered + sorted playlist list ───────────────────────────────────
-        let all_playlists: Rc<Vec<PlaylistDescription>> = Rc::new(playlists.clone());
-        let initially_contains_rc = Rc::new(initially_contains.clone());
-        let list_container = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .build();
-        list_box.append(&list_container);
-
-        let rebuild_list = {
-            let all_playlists = all_playlists.clone();
-            let initially_contains_rc = initially_contains_rc.clone();
-            let staged_adds = staged_adds.clone();
-            let staged_removes = staged_removes.clone();
-            let sort_mode = sort_mode.clone();
-            let list_container = list_container.clone();
-            let worker = worker.clone();
-            let search_entry = search_entry.clone();
-            move || {
-                while let Some(child) = list_container.first_child() {
-                    list_container.remove(&child);
-                }
-                let filter = search_entry.text().to_lowercase();
-                let mut visible: Vec<&PlaylistDescription> = all_playlists
-                    .iter()
-                    .filter(|p| !initially_contains_rc.contains(&p.id))
-                    .filter(|p| filter.is_empty() || p.title.to_lowercase().contains(&filter))
-                    .collect();
-                if sort_mode.get() == SortMode::Alphabetical {
-                    visible.sort_by(|a, b| a.title.cmp(&b.title));
-                }
-                // FetchOrder: retain the API's natural order (no timestamp metadata).
-                if visible.is_empty() {
-                    list_container.append(
-                        &libadwaita::StatusPage::builder()
-                            .title(gettext("No playlists found"))
-                            .vexpand(true)
-                            .build(),
-                    );
+        self.worker.send_local_task(async move {
+            for (playlist_id, snapshot_id) in to_fetch {
+                // If the sheet was closed or the user moved to a different song,
+                // discard remaining fetches for this session.
+                if session_token.get() != my_token || !sheet.property::<bool>("open") {
                     return;
                 }
-                for pl in visible {
-                    let checked = staged_adds.borrow().contains(&pl.id);
-                    let row = playlist_row(
-                        pl,
-                        checked,
-                        &worker,
-                        staged_adds.clone(),
-                        staged_removes.clone(),
-                        &initially_contains_rc,
-                    );
-                    list_container.append(&row);
-                }
+
+                let Ok(ids) = api.get_playlist_track_ids(&playlist_id).await else {
+                    continue;
+                };
+
+                index_rc.borrow_mut().insert(
+                    playlist_id,
+                    PlaylistIndexEntry {
+                        snapshot_id,
+                        track_ids: ids.into_iter().collect(),
+                    },
+                );
             }
-        };
-        rebuild_list();
-        let rebuild_list = Rc::new(rebuild_list);
 
-        // Search filter
-        search_entry.connect_search_changed(clone!(
-            #[strong]
-            rebuild_list,
-            move |_| rebuild_list()
-        ));
-
-        // Sort control
-        sort_drop.connect_selected_notify(clone!(
-            #[strong]
-            sort_mode,
-            #[strong]
-            rebuild_list,
-            move |drop| {
-                sort_mode.set(if drop.selected() == 0 {
-                    SortMode::Alphabetical
-                } else {
-                    SortMode::FetchOrder
-                });
-                rebuild_list();
-            }
-        ));
-
-        // ── New playlist confirm ──────────────────────────────────────────────
-        let model_np = model.clone();
-        let entry_for_confirm = name_entry.clone();
-        let confirm_for_cb = confirm_btn.clone();
-        let label_for_confirm = new_label.clone();
-        let do_confirm = move || {
-            let name = entry_for_confirm.text().trim().to_string();
-            if name.is_empty() {
+            // Session still valid — rebuild the drawer so membership checkmarks
+            // and the "Saved in" section reflect the freshly indexed data.
+            // staged_adds/staged_removes live on their Rc handles and are untouched.
+            if session_token.get() != my_token || !sheet.property::<bool>("open") {
                 return;
             }
-            entry_for_confirm.set_text("");
-            entry_for_confirm.set_visible(false);
-            confirm_for_cb.set_visible(false);
-            label_for_confirm.set_visible(true);
-            model_np.create_new_playlist(name);
-            // The new playlist will appear in the list when UserPlaylistsLoaded
-            // fires — the on_event handler rebuilds the drawer at that point,
-            // and the new playlist id will be auto-staged as an add.
-        };
-        let do_confirm = Rc::new(do_confirm);
-        confirm_btn.connect_clicked(clone!(
-            #[strong]
-            do_confirm,
-            move |_| do_confirm()
-        ));
-        name_entry.connect_activate(clone!(
-            #[strong]
-            do_confirm,
-            move |_| do_confirm()
-        ));
 
-        // ── Cancel ────────────────────────────────────────────────────────────
-        cancel_btn.connect_clicked(clone!(
-            #[weak]
-            sheet,
-            move |_| set_sheet_open(&sheet, false)
-        ));
-
-        // ── Save: apply the diff ──────────────────────────────────────────────
-        // adds    = staged_adds  \ initially_contains
-        // removes = staged_removes ∩ initially_contains
-        let model_save = model.clone();
-        let staged_adds_save = staged_adds.clone();
-        let staged_removes_save = staged_removes.clone();
-        let initially_contains_save = initially_contains.clone();
-        let song_uri_save = song_uri.clone();
-        save_btn.connect_clicked(clone!(
-            #[weak]
-            sheet,
-            move |_| {
-                set_sheet_open(&sheet, false);
-                let adds: Vec<String> = staged_adds_save
-                    .borrow()
+            // Rebuild the playlist list and compute membership from the updated index.
+            let playlists_now = model_rc.user_playlists();
+            let initially_contains: HashSet<String> = {
+                let index = index_rc.borrow();
+                let song_id = &song.id;
+                playlists_now
                     .iter()
-                    .filter(|id| !initially_contains_save.contains(*id))
-                    .cloned()
-                    .collect();
-                let removes: Vec<String> = staged_removes_save
-                    .borrow()
-                    .iter()
-                    .filter(|id| initially_contains_save.contains(*id))
-                    .cloned()
-                    .collect();
-                for pid in adds {
-                    model_save.add_to_playlist(pid, song_uri_save.clone());
-                }
-                for pid in removes {
-                    model_save.remove_from_playlist(pid, song_uri_save.clone());
-                }
-            }
-        ));
+                    .filter(|p| {
+                        index
+                            .get(&p.id)
+                            .is_some_and(|e| e.track_ids.contains(song_id))
+                    })
+                    .map(|p| p.id.clone())
+                    .collect()
+            };
 
-        self.host.set_child(Some(&root));
+            build_drawer_ui(
+                &song,
+                &playlists_now,
+                initially_contains,
+                &sheet,
+                &host,
+                &model_rc,
+                &worker,
+                &staged_adds,
+                &staged_removes,
+            );
+        });
     }
+}
+
+// Shared drawer layout. Called by both build_for (via self) and the async
+// refresh path. All state that differs between the two call-sites is passed
+// as explicit arguments so there is exactly one copy of the widget tree.
+#[allow(clippy::too_many_arguments)]
+fn build_drawer_ui(
+    song: &SongDescription,
+    playlists: &[PlaylistDescription],
+    initially_contains: HashSet<String>,
+    sheet: &gtk::Widget,
+    host: &libadwaita::Bin,
+    model: &Rc<AddToPlaylistModel>,
+    worker: &Worker,
+    staged_adds: &Rc<RefCell<HashSet<String>>>,
+    staged_removes: &Rc<RefCell<HashSet<String>>>,
+) {
+    let song_uri = song.uri.clone();
+    let sort_mode: Rc<Cell<SortMode>> = Rc::new(Cell::new(SortMode::Alphabetical));
+
+    // ── Root layout ──────────────────────────────────────────────────────────
+    let root = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .build();
+
+    // Header bar
+    let header_bar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(0)
+        .margin_top(20)
+        .margin_start(16)
+        .margin_end(16)
+        .margin_bottom(8)
+        .build();
+
+    let cancel_btn = gtk::Button::builder()
+        .label(gettext("Cancel"))
+        .css_classes(["flat"])
+        .build();
+    let title_label = gtk::Label::builder()
+        .label(gettext("Add to playlist"))
+        .hexpand(true)
+        .halign(gtk::Align::Center)
+        .css_classes(["title-4"])
+        .build();
+    let save_btn = gtk::Button::builder()
+        .label(gettext("Save"))
+        .css_classes(["suggested-action"])
+        .build();
+
+    header_bar.append(&cancel_btn);
+    header_bar.append(&title_label);
+    header_bar.append(&save_btn);
+    root.append(&header_bar);
+
+    // Track card
+    let track_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .margin_top(8)
+        .margin_bottom(8)
+        .margin_start(16)
+        .margin_end(16)
+        .build();
+    track_row.append(&art_thumbnail(song.art.as_ref(), worker));
+    track_row.append(&song_text_box(&song.title, &song.artists_name()));
+    root.append(&track_row);
+    root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    // Search + sort toolbar
+    let toolbar = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .margin_top(8)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(4)
+        .build();
+    let search_entry = gtk::SearchEntry::builder()
+        .placeholder_text(gettext("Find a playlist"))
+        .hexpand(true)
+        .build();
+    // Two options: Alphabetical or Default (API fetch order, which
+    // approximates Spotify's recent-activity ordering).
+    let sort_strings = gtk::StringList::new(&[&gettext("Alphabetical"), &gettext("Default")]);
+    let sort_drop = gtk::DropDown::builder()
+        .model(&sort_strings)
+        .selected(0)
+        .build();
+    toolbar.append(&search_entry);
+    toolbar.append(&sort_drop);
+    root.append(&toolbar);
+
+    // Scrollable list
+    let list_box = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_top(4)
+        .margin_bottom(24)
+        .build();
+    let clamp = libadwaita::Clamp::builder()
+        .maximum_size(600)
+        .child(&list_box)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&clamp)
+        .build();
+    root.append(&scroll);
+
+    // ── "New playlist" row ────────────────────────────────────────────────────
+    let new_row = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(12)
+        .margin_top(4)
+        .margin_bottom(4)
+        .build();
+    let new_icon = gtk::Image::builder()
+        .icon_name("list-add-symbolic")
+        .pixel_size(32)
+        .margin_start(8)
+        .margin_end(8)
+        .build();
+    let new_label = gtk::Label::builder()
+        .label(gettext("New playlist"))
+        .hexpand(true)
+        .xalign(0.0)
+        .build();
+    let name_entry = gtk::Entry::builder()
+        .placeholder_text(gettext("Playlist name"))
+        .hexpand(true)
+        .visible(false)
+        .build();
+    let confirm_btn = gtk::Button::builder()
+        .icon_name("object-select-symbolic")
+        .css_classes(["flat", "circular"])
+        .valign(gtk::Align::Center)
+        .visible(false)
+        .build();
+    new_row.append(&new_icon);
+    new_row.append(&new_label);
+    new_row.append(&name_entry);
+    new_row.append(&confirm_btn);
+
+    let new_btn = gtk::Button::builder()
+        .child(&new_row)
+        .css_classes(["flat"])
+        .build();
+
+    let entry_ref = name_entry.clone();
+    let confirm_ref2 = confirm_btn.clone();
+    let label_ref = new_label.clone();
+    new_btn.connect_clicked(move |_| {
+        let showing = gtk::prelude::WidgetExt::is_visible(&entry_ref);
+        entry_ref.set_visible(!showing);
+        confirm_ref2.set_visible(!showing);
+        label_ref.set_visible(showing);
+        if !showing {
+            entry_ref.grab_focus();
+        }
+    });
+
+    list_box.append(&new_btn);
+    list_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+    // ── "Saved in" section ────────────────────────────────────────────────────
+    // Populated from the membership index; shows real membership once the
+    // background refresh finishes and the next build is triggered.
+    if !initially_contains.is_empty() {
+        let saved_label = gtk::Label::builder()
+            .label(gettext("Saved in"))
+            .xalign(0.0)
+            .margin_top(8)
+            .margin_bottom(4)
+            .css_classes(["heading"])
+            .build();
+        list_box.append(&saved_label);
+        for pl in playlists
+            .iter()
+            .filter(|p| initially_contains.contains(&p.id))
+        {
+            let row = playlist_row(
+                pl,
+                true,
+                worker,
+                staged_adds.clone(),
+                staged_removes.clone(),
+                &initially_contains,
+            );
+            list_box.append(&row);
+        }
+        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
+        sep.set_margin_top(8);
+        sep.set_margin_bottom(4);
+        list_box.append(&sep);
+    }
+
+    // ── Filtered + sorted playlist list ───────────────────────────────────────
+    let all_playlists: Rc<Vec<PlaylistDescription>> = Rc::new(playlists.to_vec());
+    let initially_contains_rc = Rc::new(initially_contains.clone());
+    let list_container = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(2)
+        .build();
+    list_box.append(&list_container);
+
+    let rebuild_list = {
+        let all_playlists = all_playlists.clone();
+        let initially_contains_rc = initially_contains_rc.clone();
+        let staged_adds = staged_adds.clone();
+        let staged_removes = staged_removes.clone();
+        let sort_mode = sort_mode.clone();
+        let list_container = list_container.clone();
+        let worker = worker.clone();
+        let search_entry = search_entry.clone();
+        move || {
+            while let Some(child) = list_container.first_child() {
+                list_container.remove(&child);
+            }
+            let filter = search_entry.text().to_lowercase();
+            let mut visible: Vec<&PlaylistDescription> = all_playlists
+                .iter()
+                .filter(|p| !initially_contains_rc.contains(&p.id))
+                .filter(|p| filter.is_empty() || p.title.to_lowercase().contains(&filter))
+                .collect();
+            if sort_mode.get() == SortMode::Alphabetical {
+                visible.sort_by(|a, b| a.title.cmp(&b.title));
+            }
+            // Default: retain the API's natural order (recent-activity proxy).
+            if visible.is_empty() {
+                list_container.append(
+                    &libadwaita::StatusPage::builder()
+                        .title(gettext("No playlists found"))
+                        .vexpand(true)
+                        .build(),
+                );
+                return;
+            }
+            for pl in visible {
+                let checked = staged_adds.borrow().contains(&pl.id);
+                let row = playlist_row(
+                    pl,
+                    checked,
+                    &worker,
+                    staged_adds.clone(),
+                    staged_removes.clone(),
+                    &initially_contains_rc,
+                );
+                list_container.append(&row);
+            }
+        }
+    };
+    rebuild_list();
+    let rebuild_list = Rc::new(rebuild_list);
+
+    // Search filter
+    search_entry.connect_search_changed(clone!(
+        #[strong]
+        rebuild_list,
+        move |_| rebuild_list()
+    ));
+
+    // Sort control
+    sort_drop.connect_selected_notify(clone!(
+        #[strong]
+        sort_mode,
+        #[strong]
+        rebuild_list,
+        move |drop| {
+            sort_mode.set(if drop.selected() == 0 {
+                SortMode::Alphabetical
+            } else {
+                SortMode::Default
+            });
+            rebuild_list();
+        }
+    ));
+
+    // ── New playlist confirm ──────────────────────────────────────────────────
+    let model_np = model.clone();
+    let entry_for_confirm = name_entry.clone();
+    let confirm_for_cb = confirm_btn.clone();
+    let label_for_confirm = new_label.clone();
+    let do_confirm = move || {
+        let name = entry_for_confirm.text().trim().to_string();
+        if name.is_empty() {
+            return;
+        }
+        entry_for_confirm.set_text("");
+        entry_for_confirm.set_visible(false);
+        confirm_for_cb.set_visible(false);
+        label_for_confirm.set_visible(true);
+        model_np.create_new_playlist(name);
+        // The new playlist appears via UserPlaylistsLoaded; on_event rebuilds
+        // the drawer and auto-stages the new id via known_playlist_ids diffing.
+    };
+    let do_confirm = Rc::new(do_confirm);
+    confirm_btn.connect_clicked(clone!(
+        #[strong]
+        do_confirm,
+        move |_| do_confirm()
+    ));
+    name_entry.connect_activate(clone!(
+        #[strong]
+        do_confirm,
+        move |_| do_confirm()
+    ));
+
+    // ── Cancel ────────────────────────────────────────────────────────────────
+    let sheet_clone = sheet.clone();
+    cancel_btn.connect_clicked(move |_| set_sheet_open(&sheet_clone, false));
+
+    // ── Save: apply the diff ──────────────────────────────────────────────────
+    // adds    = staged_adds  \ initially_contains
+    // removes = staged_removes ∩ initially_contains
+    let model_save = model.clone();
+    let staged_adds_save = staged_adds.clone();
+    let staged_removes_save = staged_removes.clone();
+    let initially_contains_save = initially_contains_rc.as_ref().clone();
+    let song_uri_save = song_uri;
+    let sheet_save = sheet.clone();
+    save_btn.connect_clicked(move |_| {
+        set_sheet_open(&sheet_save, false);
+        let adds: Vec<String> = staged_adds_save
+            .borrow()
+            .iter()
+            .filter(|id| !initially_contains_save.contains(*id))
+            .cloned()
+            .collect();
+        let removes: Vec<String> = staged_removes_save
+            .borrow()
+            .iter()
+            .filter(|id| initially_contains_save.contains(*id))
+            .cloned()
+            .collect();
+        for pid in adds {
+            model_save.add_to_playlist(pid, song_uri_save.clone());
+        }
+        for pid in removes {
+            model_save.remove_from_playlist(pid, song_uri_save.clone());
+        }
+    });
+
+    host.set_child(Some(&root));
 }
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
-/// Load a 48×48 thumbnail from an optional `ImageSet`.  Used for both track
-/// art and playlist art — the caller passes `desc.art.as_ref()`.
 fn art_thumbnail(art: Option<&ImageSet>, worker: &Worker) -> gtk::Image {
     let image = gtk::Image::builder()
         .pixel_size(48)
@@ -641,25 +767,45 @@ impl EventListener for AddToPlaylist {
     fn on_event(&mut self, event: &AppEvent) {
         match event {
             AppEvent::AddToPlaylistShown(song) => {
-                // Opening for a new song: reset all staged state and known ids
-                // so this session starts clean.
                 self.staged_adds.borrow_mut().clear();
                 self.staged_removes.borrow_mut().clear();
-                self.known_playlist_ids.borrow_mut().clear();
+
+                // Seed known_playlist_ids with the current set BEFORE build_for
+                // so that on the first build nothing is treated as "new" and
+                // auto-checked. Only playlists created during this session
+                // (whose ids appear on subsequent UserPlaylistsLoaded events)
+                // will be auto-staged.
+                {
+                    let playlists = self.model.user_playlists();
+                    let current_ids: HashSet<String> =
+                        playlists.iter().map(|p| p.id.clone()).collect();
+                    *self.known_playlist_ids.borrow_mut() = current_ids;
+                }
+
+                // Bump the session token so any in-flight refresh for the
+                // previous song discards its results.
+                self.session_token.set(self.session_token.get() + 1);
+
                 *self.current_song.borrow_mut() = Some(song.clone());
                 self.build_for(song);
+
+                let playlists = self.model.user_playlists();
+                let api = self.model.app_model.get_spotify();
+                self.refresh_membership_index(song.clone(), playlists, api);
+
                 set_sheet_open(&self.sheet, true);
             }
-            // Rebuild the list when the user's playlists change (e.g. a new
-            // playlist was just created and appeared via CreatePlaylist dispatch).
-            // staged_adds/staged_removes are NOT cleared here — prior selections
-            // must survive the rebuild, and newly-created playlists are
-            // auto-staged inside build_for via known_playlist_ids diffing.
+            // Rebuild when playlists change (new playlist created, etc.).
+            // staged_adds/staged_removes survive the rebuild; newly-created
+            // playlists are auto-staged via known_playlist_ids diffing in build_for.
             AppEvent::LoginEvent(LoginEvent::UserPlaylistsLoaded)
             | AppEvent::BrowserEvent(BrowserEvent::SavedPlaylistsUpdated) => {
                 if let Some(song) = self.current_song.borrow().clone() {
                     if self.sheet.property::<bool>("open") {
                         self.build_for(&song);
+                        let playlists = self.model.user_playlists();
+                        let api = self.model.app_model.get_spotify();
+                        self.refresh_membership_index(song.clone(), playlists, api);
                     }
                 }
             }

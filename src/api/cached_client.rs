@@ -35,6 +35,12 @@ pub trait SpotifyApiClient {
         limit: usize,
     ) -> BoxFuture<SpotifyResult<SongBatch>>;
 
+    /// Fetch all track ids for a playlist, paging automatically.
+    /// Uses a fields-filtered endpoint so each page is tiny.
+    /// Cost: first open fetches all pages (one req per 50 tracks); subsequent
+    /// opens only re-fetch playlists whose snapshot_id changed.
+    fn get_playlist_track_ids(&self, id: &str) -> BoxFuture<SpotifyResult<Vec<String>>>;
+
     fn get_saved_albums(
         &self,
         offset: usize,
@@ -579,6 +585,39 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .await?;
 
             Ok(songs.into())
+        })
+    }
+
+    fn get_playlist_track_ids(&self, id: &str) -> BoxFuture<SpotifyResult<Vec<String>>> {
+        let id = id.to_owned();
+
+        Box::pin(async move {
+            const PAGE: usize = 50;
+            let mut ids: Vec<String> = Vec::new();
+            let mut offset = 0usize;
+
+            loop {
+                let page = self
+                    .client
+                    .get_playlist_track_ids(&id, offset, PAGE)
+                    .send()
+                    .await?
+                    .deserialize()
+                    .ok_or(SpotifyApiError::NoContent)?;
+
+                let total = page.total();
+                let fetched: Vec<String> =
+                    page.into_iter().filter_map(|item| item.track?.id).collect();
+
+                ids.extend(fetched);
+                offset += PAGE;
+
+                if offset >= total {
+                    break;
+                }
+            }
+
+            Ok(ids)
         })
     }
 

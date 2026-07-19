@@ -332,6 +332,7 @@ mod tests {
         stub_api_method!(get_followed_artists(_after: Option<String>, _limit: usize) -> (Vec<ArtistSummary>, Option<String>));
         stub_api_method!(follow_artist(_id: &str) -> ());
         stub_api_method!(unfollow_artist(_id: &str) -> ());
+        stub_api_method!(get_playlist_track_ids(_id: &str) -> Vec<String>);
     }
 
     // Test helpers

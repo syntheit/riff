@@ -57,6 +57,7 @@ impl From<&PlaylistDescription> for CardModel {
             None,
             None,
         )
+        .with_snapshot_id(playlist.snapshot_id.clone())
     }
 }
 

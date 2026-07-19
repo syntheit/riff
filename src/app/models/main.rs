@@ -162,6 +162,9 @@ pub struct PlaylistDescription {
     pub art: Option<ImageSet>,
     pub songs: SongBatch,
     pub owner: UserRef,
+    /// Opaque change-hash from the Spotify API. Used to skip re-fetching track
+    /// ids when the playlist hasn't changed since the last index build.
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug)]

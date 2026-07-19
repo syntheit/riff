@@ -46,6 +46,11 @@ impl CardModel {
         builder.build()
     }
 
+    pub fn with_snapshot_id(self, snapshot_id: Option<String>) -> Self {
+        self.set_property("snapshot-id", &snapshot_id);
+        self
+    }
+
     pub fn with_data<T: Any>(self, data: T) -> Self {
         self.imp().data.borrow_mut().replace(Box::new(data));
         self
@@ -82,6 +87,8 @@ mod imp {
         popularity: Cell<u32>,
         #[property(get, set, name = "insertion-position")]
         insertion_position: Cell<u32>,
+        #[property(get, set, name = "snapshot-id")]
+        snapshot_id: RefCell<Option<String>>,
 
         pub data: RefCell<Option<Box<dyn Any + 'static>>>,
     }
@@ -199,6 +206,7 @@ mod tests {
                 id: "user1".to_string(),
                 display_name: "John".to_string(),
             },
+            snapshot_id: None,
         };
         let card = CardModel::from(&playlist);
         assert_eq!(card.id(), "pl1");
