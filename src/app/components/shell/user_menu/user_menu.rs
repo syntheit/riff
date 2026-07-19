@@ -5,8 +5,9 @@ use libadwaita::prelude::AdwDialogExt;
 use std::rc::Rc;
 
 use super::UserMenuModel;
-use crate::app::components::{EventListener, Settings};
-use crate::app::{state::LoginEvent, AppEvent};
+use crate::app::components::EventListener;
+use crate::app::state::{BrowserAction, LoginEvent, ScreenName};
+use crate::app::{ActionDispatcher, AppEvent};
 
 pub struct UserMenu {
     user_button: gtk::MenuButton,
@@ -16,10 +17,10 @@ pub struct UserMenu {
 impl UserMenu {
     pub fn new(
         user_button: gtk::MenuButton,
-        settings: Settings,
         about: libadwaita::AboutDialog,
         parent: gtk::Window,
         model: UserMenuModel,
+        dispatcher: Box<dyn ActionDispatcher>,
     ) -> Self {
         let model = Rc::new(model);
 
@@ -40,7 +41,7 @@ impl UserMenu {
         action_group.add_action(&{
             let settings_action = SimpleAction::new("settings", None);
             settings_action.connect_activate(move |_, _| {
-                settings.show_self();
+                dispatcher.dispatch(BrowserAction::NavigationPush(ScreenName::Settings).into());
             });
             settings_action
         });

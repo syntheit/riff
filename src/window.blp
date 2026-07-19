@@ -60,20 +60,40 @@ Adw.ApplicationWindow window {
       }
 
       // Tab shell + pushed detail pages.
-      Adw.ToastOverlay main {
+      // Wrapped in an Overlay so the ⋯ menu button can float top-right
+      // without any HeaderBar (which would create dead space under the
+      // system top bar on GNOME Shell Mobile).
+      Overlay {
         hexpand: true;
         vexpand: true;
 
-        Adw.NavigationView root_nav {
-          Adw.NavigationPage {
-            title: _("Riff");
-            tag: "tabs";
-            can-pop: false;
+        Adw.ToastOverlay main {
+          hexpand: true;
+          vexpand: true;
 
-            child: Adw.ViewStack tab_stack {
-              vexpand: true;
-            };
+          Adw.NavigationView root_nav {
+            Adw.NavigationPage {
+              title: _("Riff");
+              tag: "tabs";
+              can-pop: false;
+
+              child: Adw.ViewStack tab_stack {
+                vexpand: true;
+              };
+            }
           }
+        }
+
+        // Menu button pinned top-right. No HeaderBar → no dead-space gap.
+        [overlay]
+        MenuButton user {
+          icon-name: "open-menu-symbolic";
+          focus-on-click: false;
+          can-focus: false;
+          halign: end;
+          valign: start;
+          margin-top: 4;
+          margin-end: 8;
         }
       }
 
@@ -92,9 +112,6 @@ Adw.ApplicationWindow window {
       }
 
       // Bottom tab bar (Home / Search / Library), always visible.
-      // The ⋯ menu button lives here too: the top HeaderBar was removed to
-      // eliminate the dead-space strip between the system top bar and the
-      // app's content on GNOME Shell Mobile.
       Box {
         orientation: horizontal;
 
@@ -102,14 +119,6 @@ Adw.ApplicationWindow window {
           stack: tab_stack;
           reveal: true;
           hexpand: true;
-        }
-
-        MenuButton user {
-          icon-name: "open-menu-symbolic";
-          focus-on-click: false;
-          can-focus: false;
-          valign: center;
-          margin-end: 12;
         }
       }
     };

@@ -312,13 +312,10 @@ impl App {
         dispatcher: Box<dyn ActionDispatcher>,
     ) -> Box<UserMenu> {
         let parent: gtk::Window = builder.object("window").unwrap();
-        let settings_model = SettingsModel::new(app_model.clone(), dispatcher.box_clone());
-        let settings = Settings::new(parent.clone(), settings_model);
-
         let button: gtk::MenuButton = builder.object("user").unwrap();
         let about: libadwaita::AboutDialog = builder.object("about").unwrap();
-        let model = UserMenuModel::new(app_model, dispatcher);
-        let user_menu = UserMenu::new(button, settings, about, parent, model);
+        let model = UserMenuModel::new(app_model, dispatcher.box_clone());
+        let user_menu = UserMenu::new(button, about, parent, model, dispatcher);
         Box::new(user_menu)
     }
 

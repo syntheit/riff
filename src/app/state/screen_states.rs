@@ -18,6 +18,7 @@ pub enum ScreenName {
     Artist(String),
     PlaylistDetails(String),
     User(String),
+    Settings,
 }
 
 impl ScreenName {
@@ -29,6 +30,7 @@ impl ScreenName {
             Self::Artist(s) => Cow::Owned(format!("artist_{s}")),
             Self::PlaylistDetails(s) => Cow::Owned(format!("playlist_{s}")),
             Self::User(s) => Cow::Owned(format!("user_{s}")),
+            Self::Settings => Cow::Borrowed("settings"),
         }
     }
 }

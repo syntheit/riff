@@ -1,8 +1,9 @@
-use crate::app::components::EventListener;
-use crate::app::AppEvent;
+use crate::app::components::{Component, EventListener};
+use crate::app::{AppEvent, BrowserEvent};
 use crate::feature_flags::{self, FeatureFlag};
 use crate::settings::RiffSettings;
 
+use gettextrs::gettext;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
@@ -552,66 +553,84 @@ impl SettingsDialog {
             manager.set_color_scheme(pref);
         });
     }
-
-    fn connect_close<F>(&self, on_close: F)
-    where
-        F: Fn() + 'static,
-    {
-        let dialog = self.upcast_ref::<libadwaita::Dialog>();
-        dialog.connect_close_attempt(move |_| {
-            on_close();
-        });
-    }
-
-    /// Re-lock the equalizer and pan controls. The locks are UI-only and never
-    /// persisted, so they are reset every time the dialog is opened.
-    fn reset_locks(&self) {
-        self.imp().equalizer.lock();
-        self.imp().pan.lock();
-        self.imp().pitch.lock();
-    }
 }
 
-pub struct Settings {
-    parent: gtk::Window,
-    settings_dialog: SettingsDialog,
+/// Settings hosted as an in-app navigation page pushed onto `root_nav`.
+/// The `SettingsDialog` is never presented as a dialog — it is only used as a
+/// convenient container for the GSettings bindings and the `Adw.PreferencesPage`
+/// child widget, which is extracted and re-hosted inside an `Adw.ToolbarView`.
+pub struct SettingsPage {
+    // Kept alive so its GObject signal handlers and GSettings bindings stay valid.
+    _dialog: SettingsDialog,
+    model: SettingsModel,
+    settings_snapshot: RiffSettings,
+    root: gtk::Widget,
 }
 
-impl Settings {
-    pub fn new(parent: gtk::Window, model: SettingsModel) -> Self {
-        let settings_dialog = SettingsDialog::new();
+impl SettingsPage {
+    pub fn new(model: SettingsModel) -> Self {
+        let dialog = SettingsDialog::new();
 
-        settings_dialog.connect_close(move || {
-            let new_settings = RiffSettings::new_from_gsettings().unwrap_or_default();
-            // Only stop the player for changes that require a full reload.
-            // Equalizer changes are applied live and must not interrupt playback.
-            if model
-                .settings()
-                .player_settings
-                .requires_reload(&new_settings.player_settings)
-            {
-                model.stop_player();
-            }
-            model.set_settings();
-        });
+        // Extract the single preferences page from the dialog before it is
+        // ever realized or presented, then unparent it so we can re-host it.
+        let page = dialog
+            .upcast_ref::<libadwaita::PreferencesDialog>()
+            .visible_page()
+            .expect("SettingsDialog must have a visible page");
+        page.unparent();
+
+        let scrolled = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&page)
+            .build();
+
+        let header = libadwaita::HeaderBar::new();
+        // Use an empty title widget so the NavigationPage title (set externally
+        // via push_component) shows through the back-button slot.
+        header.set_title_widget(Some(&gtk::Label::new(Some(&gettext("Settings")))));
+
+        let toolbar_view = libadwaita::ToolbarView::new();
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&scrolled));
+
+        let snapshot = model.settings();
 
         Self {
-            parent,
-            settings_dialog,
+            _dialog: dialog,
+            model,
+            settings_snapshot: snapshot,
+            root: toolbar_view.upcast(),
         }
     }
 
-    fn dialog(&self) -> &libadwaita::Dialog {
-        self.settings_dialog.upcast_ref::<libadwaita::Dialog>()
-    }
-
-    pub fn show_self(&self) {
-        // Locks are UI-only and must not be stateful between openings.
-        self.settings_dialog.reset_locks();
-        self.dialog().present(Some(&self.parent));
+    fn on_navigated_away(&self) {
+        let new_settings = RiffSettings::new_from_gsettings().unwrap_or_default();
+        if self
+            .settings_snapshot
+            .player_settings
+            .requires_reload(&new_settings.player_settings)
+        {
+            self.model.stop_player();
+        }
+        self.model.set_settings();
     }
 }
 
-impl EventListener for Settings {
-    fn on_event(&mut self, _: &AppEvent) {}
+impl Component for SettingsPage {
+    fn get_root_widget(&self) -> &gtk::Widget {
+        &self.root
+    }
+}
+
+impl EventListener for SettingsPage {
+    fn on_event(&mut self, event: &AppEvent) {
+        // When the user navigates back, commit the settings changes.
+        if matches!(
+            event,
+            AppEvent::BrowserEvent(BrowserEvent::NavigationPopped)
+        ) {
+            self.on_navigated_away();
+        }
+    }
 }

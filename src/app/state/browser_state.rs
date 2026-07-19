@@ -108,6 +108,20 @@ impl From<BrowserEvent> for AppEvent {
     }
 }
 
+// Stateless placeholder for screens that carry no reducible state (e.g. Settings).
+pub(crate) struct StatelessScreen {
+    name: ScreenName,
+}
+
+impl UpdatableState for StatelessScreen {
+    type Action = BrowserAction;
+    type Event = BrowserEvent;
+
+    fn update_with(&mut self, _action: Cow<Self::Action>) -> Vec<Self::Event> {
+        vec![]
+    }
+}
+
 // Any screen that can be "pushed"
 pub enum BrowserScreen {
     Home(Box<HomeState>), // Except this one is special, it's there at the start
@@ -116,6 +130,7 @@ pub enum BrowserScreen {
     Artist(Box<ArtistState>),
     PlaylistDetails(Box<PlaylistDetailsState>),
     User(Box<UserState>),
+    Stateless(Box<StatelessScreen>),
 }
 
 impl BrowserScreen {
@@ -133,6 +148,9 @@ impl BrowserScreen {
                 BrowserScreen::PlaylistDetails(Box::new(PlaylistDetailsState::new(id.to_string())))
             }
             ScreenName::User(id) => BrowserScreen::User(Box::new(UserState::new(id.to_string()))),
+            ScreenName::Settings => {
+                BrowserScreen::Stateless(Box::new(StatelessScreen { name: name.clone() }))
+            }
         }
     }
 
@@ -145,6 +163,7 @@ impl BrowserScreen {
             Self::Artist(state) => &mut **state,
             Self::PlaylistDetails(state) => &mut **state,
             Self::User(state) => &mut **state,
+            Self::Stateless(state) => &mut **state,
         }
     }
 }
@@ -160,6 +179,7 @@ impl NamedScreen for BrowserScreen {
             Self::Artist(state) => &state.name,
             Self::PlaylistDetails(state) => &state.name,
             Self::User(state) => &state.name,
+            Self::Stateless(state) => &state.name,
         }
     }
 }
