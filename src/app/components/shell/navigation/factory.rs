@@ -162,6 +162,6 @@ impl ScreenFactory {
 
     pub fn make_settings(&self) -> impl ListenerComponent {
         let model = SettingsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
-        SettingsPage::new(model)
+        SettingsPage::new(model, self.dispatcher.box_clone())
     }
 }

@@ -1,5 +1,6 @@
+use crate::app::components::shell::headerbar::HeaderBarWidget;
 use crate::app::components::{Component, EventListener};
-use crate::app::{AppEvent, BrowserEvent};
+use crate::app::{ActionDispatcher, AppEvent, BrowserAction, BrowserEvent};
 use crate::feature_flags::{self, FeatureFlag};
 use crate::settings::RiffSettings;
 
@@ -562,13 +563,15 @@ impl SettingsDialog {
 pub struct SettingsPage {
     // Kept alive so its GObject signal handlers and GSettings bindings stay valid.
     _dialog: SettingsDialog,
+    // Kept alive so its `connect_go_back` closure (capturing the dispatcher) stays valid.
+    _headerbar: HeaderBarWidget,
     model: SettingsModel,
     settings_snapshot: RiffSettings,
     root: gtk::Widget,
 }
 
 impl SettingsPage {
-    pub fn new(model: SettingsModel) -> Self {
+    pub fn new(model: SettingsModel, dispatcher: Box<dyn ActionDispatcher>) -> Self {
         let dialog = SettingsDialog::new();
 
         // Extract the single preferences page from the dialog before it is
@@ -579,25 +582,44 @@ impl SettingsPage {
             .expect("SettingsDialog must have a visible page");
         page.unparent();
 
+        // Wrap in a Clamp so the preferences page never exceeds screen width.
+        // Without this the EQ horizontal Scale box forces a wide natural size
+        // and the page overflows horizontally when re-hosted outside its dialog.
+        let clamp = libadwaita::Clamp::new();
+        clamp.set_maximum_size(600);
+        clamp.set_child(Some(&page));
+        clamp.set_hexpand(true);
+
         let scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&page)
+            .child(&clamp)
             .build();
 
-        let header = libadwaita::HeaderBar::new();
-        // Use an empty title widget so the NavigationPage title (set externally
-        // via push_component) shows through the back-button slot.
-        header.set_title_widget(Some(&gtk::Label::new(Some(&gettext("Settings")))));
+        // Reuse the shared HeaderBarWidget so we get a back button wired to
+        // NavigationPop, matching the detail pages' pattern exactly.
+        let headerbar = HeaderBarWidget::new();
+        headerbar.set_title(Some(&gettext("Settings")));
+        // Settings pages never have a selection mode.
+        headerbar.set_selection_possible(false);
+        // Back button visibility: settings is always pushed on top of tabs,
+        // so there is always something to pop back to.
+        headerbar.set_can_go_back(true);
+
+        let dispatcher_clone = dispatcher.box_clone();
+        headerbar.connect_go_back(move || {
+            dispatcher_clone.dispatch(BrowserAction::NavigationPop.into());
+        });
 
         let toolbar_view = libadwaita::ToolbarView::new();
-        toolbar_view.add_top_bar(&header);
+        toolbar_view.add_top_bar(headerbar.upcast_ref::<gtk::Widget>());
         toolbar_view.set_content(Some(&scrolled));
 
         let snapshot = model.settings();
 
         Self {
             _dialog: dialog,
+            _headerbar: headerbar,
             model,
             settings_snapshot: snapshot,
             root: toolbar_view.upcast(),

@@ -84,16 +84,17 @@ Adw.ApplicationWindow window {
           }
         }
 
-        // Menu button pinned top-right. No HeaderBar → no dead-space gap.
+        // Menu button pinned top-left (interim: avoids overlap with per-page
+        // view/sort buttons that live top-right on card pages).
         [overlay]
         MenuButton user {
           icon-name: "open-menu-symbolic";
           focus-on-click: false;
           can-focus: false;
-          halign: end;
+          halign: start;
           valign: start;
           margin-top: 4;
-          margin-end: 8;
+          margin-start: 8;
         }
       }
 
