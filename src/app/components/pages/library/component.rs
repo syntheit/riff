@@ -20,6 +20,16 @@ const GRID_COLUMNS: u32 = 3;
 /// Margin around the card list content.
 const CONTENT_MARGIN: i32 = 12;
 
+/// The Library screen always renders its grid at Small (100 px) so that 3 columns
+/// (3 × 100 + spacing/margins ≈ 330 px) comfortably fit the phone's ~540 px logical
+/// width. This is independent of the global card-size gsetting, which controls other
+/// pages (Home, album/artist detail grids).
+const LIBRARY_CARD_SIZE: CardSize = CardSize::Small;
+
+/// Top margin (px) added to the "Library" title so it clears the floating ⋯ menu
+/// button that lives at margin-top: 4 + ~40 px button height in window.blp.
+const TITLE_TOP_MARGIN: i32 = 48;
+
 /// The library screen's own page id, used for sort persistence (`sort-library`).
 const PAGE_ID: &str = "library";
 
@@ -41,7 +51,9 @@ pub struct LibraryScreen {
     status_page: libadwaita::StatusPage,
     scrolled_window: gtk::ScrolledWindow,
     layout: Rc<Cell<CardLayout>>,
-    size: Rc<Cell<CardSize>>,
+    /// Held to keep the shared Rc alive; this screen ignores the global size setting
+    /// and always renders at LIBRARY_CARD_SIZE (Small/100 px).
+    _size: Rc<Cell<CardSize>>,
     current_sort: Rc<Cell<SortOrder>>,
     toggle_button: gtk::Button,
 }
@@ -62,12 +74,13 @@ impl LibraryScreen {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_vexpand(true);
 
-        // (a) Big in-content title
+        // (a) Big in-content title — TITLE_TOP_MARGIN pushes it below the floating
+        // ⋯ menu button (window.blp: margin-top 4 + ~40 px button height).
         let title = gtk::Label::new(Some(&gettext("Library")));
         title.set_halign(gtk::Align::Start);
         title.set_margin_start(CONTENT_MARGIN);
         title.set_margin_end(CONTENT_MARGIN);
-        title.set_margin_top(CONTENT_MARGIN);
+        title.set_margin_top(TITLE_TOP_MARGIN);
         title.add_css_class("library-title");
         root.append(&title);
 
@@ -112,7 +125,7 @@ impl LibraryScreen {
             status_page,
             scrolled_window,
             layout,
-            size,
+            _size: size,
             current_sort,
             toggle_button,
         };
@@ -277,11 +290,13 @@ impl LibraryScreen {
         if self.model.filter() == LibraryFilter::All {
             self.model.reconcile_combined();
         }
+        // Always use LIBRARY_CARD_SIZE (Small/100 px) regardless of the shared
+        // card-size gsetting so 3 columns fit the phone's logical width (~540 px).
         self.card_list.bind(
             &self.model,
             self.worker.clone(),
             self.layout.get(),
-            self.size.get(),
+            LIBRARY_CARD_SIZE,
         );
         if self.current_sort.get() != SortOrder::RecentlyAdded {
             self.card_list.set_sort(self.current_sort.get());
@@ -289,15 +304,17 @@ impl LibraryScreen {
         self.update_empty_state();
     }
 
-    /// Grid uses a fixed 3-column layout on phones; list is single-column.
+    /// Grid uses up to 3-column layout on phones; list is single-column.
+    /// min_children_per_line is always 1 so a narrow window never demands N×card-width
+    /// as its minimum; max caps the grid at GRID_COLUMNS (3) in grid mode.
     fn apply_grid_columns(&self) {
-        let cols = if self.layout.get() == CardLayout::Horizontal {
-            1
+        let (min_cols, max_cols) = if self.layout.get() == CardLayout::Horizontal {
+            (1, 1)
         } else {
-            GRID_COLUMNS
+            (1, GRID_COLUMNS)
         };
-        self.card_list.widget().set_min_children_per_line(cols);
-        self.card_list.widget().set_max_children_per_line(cols);
+        self.card_list.widget().set_min_children_per_line(min_cols);
+        self.card_list.widget().set_max_children_per_line(max_cols);
     }
 
     fn connect_infinite_scroll(&self) {
@@ -369,7 +386,6 @@ impl LibraryScreen {
         let scrolled = self.scrolled_window.clone();
         let worker = self.worker.clone();
         let layout = Rc::clone(&self.layout);
-        let size = Rc::clone(&self.size);
         let sort = Rc::clone(&self.current_sort);
         move || {
             let (Some(model), Some(card_list)) = (model.upgrade(), card_list.upgrade()) else {
@@ -380,7 +396,8 @@ impl LibraryScreen {
             } else {
                 model.clear_combined();
             }
-            card_list.bind(&model, worker.clone(), layout.get(), size.get());
+            // Always bind with LIBRARY_CARD_SIZE (Small/100 px) — see rebind().
+            card_list.bind(&model, worker.clone(), layout.get(), LIBRARY_CARD_SIZE);
             if sort.get() != SortOrder::RecentlyAdded {
                 card_list.set_sort(sort.get());
             }
@@ -452,14 +469,17 @@ impl EventListener for LibraryScreen {
                     self.card_list.set_sort(sort);
                 }
             }
-            AppEvent::BrowserEvent(
-                BrowserEvent::CardLayoutChanged(_) | BrowserEvent::CardSizeChanged(_),
-            ) => {
+            AppEvent::BrowserEvent(BrowserEvent::CardLayoutChanged(_)) => {
                 self.card_list.update_layout(self.layout.get());
-                self.card_list.update_size(self.size.get());
+                // Keep the library's own fixed size; don't inherit the global size change.
+                self.card_list.update_size(LIBRARY_CARD_SIZE);
                 self.apply_grid_columns();
                 self.toggle_button
                     .set_icon_name(toggle_icon(self.layout.get()));
+            }
+            AppEvent::BrowserEvent(BrowserEvent::CardSizeChanged(_)) => {
+                // The Library screen ignores global card-size changes; its grid is
+                // always Small (100 px) so 3 columns fit the phone screen.
             }
             _ => {}
         }

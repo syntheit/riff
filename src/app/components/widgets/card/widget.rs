@@ -12,6 +12,7 @@ use crate::app::dispatch::Worker;
 use crate::app::loader::ImageLoader;
 use crate::app::models::{CardLayout, CardModel, CardSize};
 
+use gdk::prelude::*;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
@@ -27,6 +28,11 @@ const LABEL_GAP: i32 = 6;
 
 /// Horizontal gap (in pixels) between the image and the label box in horizontal layout.
 const HORIZONTAL_GAP: i32 = 12;
+
+/// Fixed thumbnail size (px) used for the cover image in horizontal (list) layout,
+/// regardless of the card's CardSize. This matches a compact Spotify-style list row
+/// and prevents the cover from dominating the row at Large/Medium card sizes.
+const HORIZONTAL_COVER_SIZE: i32 = 56;
 
 /// Width multiplier for the label area in horizontal layout (relative to image size).
 const HORIZONTAL_LABEL_WIDTH_SCALE: f32 = 1.8;
@@ -118,11 +124,19 @@ mod imp {
         fn measure(&self, orientation: gtk::Orientation, _for_size: i32) -> (i32, i32, i32, i32) {
             let px = self.icon_size.get();
             let layout = self.layout.get();
+            // In horizontal (list) mode the cover is always a fixed small thumbnail
+            // so rows stay compact regardless of the global card size setting.
+            let cover_px = match layout {
+                CardLayout::Horizontal => HORIZONTAL_COVER_SIZE,
+                _ => px,
+            };
 
             if orientation == gtk::Orientation::Horizontal {
                 let w = match layout {
                     CardLayout::Horizontal => {
-                        px + HORIZONTAL_GAP + (HORIZONTAL_LABEL_WIDTH_SCALE * px as f32) as i32
+                        cover_px
+                            + HORIZONTAL_GAP
+                            + (HORIZONTAL_LABEL_WIDTH_SCALE * cover_px as f32) as i32
                     }
                     _ => px,
                 };
@@ -134,9 +148,9 @@ mod imp {
                 CardLayout::Horizontal => {
                     let (label_min, _, _, _) = self.label_box.measure(
                         gtk::Orientation::Vertical,
-                        (HORIZONTAL_LABEL_WIDTH_SCALE * px as f32) as i32,
+                        (HORIZONTAL_LABEL_WIDTH_SCALE * cover_px as f32) as i32,
                     );
-                    let h = px.max(label_min);
+                    let h = cover_px.max(label_min);
                     (h, h, -1, -1)
                 }
                 CardLayout::ImageOnly => (px, px, -1, -1),
@@ -174,12 +188,15 @@ mod imp {
                     self.cover_image.allocate(px, px, -1, Some(transform));
                 }
                 CardLayout::Horizontal => {
-                    let img_y = (height - px) / 2;
+                    // Fixed small thumbnail — keeps list rows compact at any card size.
+                    let cover_px = HORIZONTAL_COVER_SIZE;
+                    let img_y = (height - cover_px) / 2;
                     let img_transform = gtk::gsk::Transform::new()
                         .translate(&gtk::graphene::Point::new(0.0, img_y as f32));
-                    self.cover_image.allocate(px, px, -1, Some(img_transform));
+                    self.cover_image
+                        .allocate(cover_px, cover_px, -1, Some(img_transform));
 
-                    let label_w = width - px - HORIZONTAL_GAP;
+                    let label_w = width - cover_px - HORIZONTAL_GAP;
                     if label_w > 0 {
                         let (label_min, _, _, _) =
                             self.label_box.measure(gtk::Orientation::Vertical, label_w);
@@ -187,7 +204,7 @@ mod imp {
                         let label_y = (height - label_h) / 2;
                         let transform =
                             gtk::gsk::Transform::new().translate(&gtk::graphene::Point::new(
-                                (px + HORIZONTAL_GAP) as f32,
+                                (cover_px + HORIZONTAL_GAP) as f32,
                                 label_y as f32,
                             ));
                         self.label_box
@@ -337,6 +354,20 @@ impl CardWidget {
                 });
             }
         } else {
+            // No remote artwork — use a themed icon as a cover placeholder so
+            // the tile is never blank. The "Liked Songs" sentinel row (and any
+            // future imageless entry) lands here.
+            //
+            // Pick an icon that hints at the card kind: a heart for the Liked
+            // Songs playlist, a generic music-note for anything else.
+            let icon_name = if model.card_kind() == crate::app::models::CardKind::Playlist
+                && model.id().starts_with("__riff_liked")
+            {
+                "emblem-favorite-symbolic"
+            } else {
+                "library-music-symbolic"
+            };
+            set_icon_paintable(&imp.cover_image, icon_name);
             model
                 .bind_property("title", &*imp.title_label, "label")
                 .flags(glib::BindingFlags::DEFAULT | glib::BindingFlags::SYNC_CREATE)
@@ -362,4 +393,25 @@ fn compose_subtitle_label(model: &CardModel, with_kind: bool) -> String {
         Some(kind) => format!("{kind} • {subtitle}"),
         None => subtitle,
     }
+}
+
+/// Render a named icon as the paintable for a cover Picture, used when a card
+/// has no remote artwork (e.g. the "Liked Songs" sentinel row). Falls back to a
+/// generic music icon if the requested name isn't found.
+fn set_icon_paintable(picture: &gtk::Picture, icon_name: &str) {
+    let theme = gtk::IconTheme::for_display(&gdk::Display::default().unwrap_or_else(|| {
+        // Should never happen inside a running GTK app, but be safe.
+        gtk::IconTheme::new().display().unwrap()
+    }));
+    // 64 px is large enough to look good at both Small (100 px) and Large (180 px)
+    // card sizes — the Picture will scale it to fill.
+    let paintable = theme.lookup_icon(
+        icon_name,
+        &[],
+        64,
+        1,
+        gtk::TextDirection::None,
+        gtk::IconLookupFlags::empty(),
+    );
+    picture.set_paintable(Some(&paintable));
 }
