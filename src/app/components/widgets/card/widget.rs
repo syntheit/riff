@@ -10,7 +10,9 @@
 use crate::app::components::display_add_css_provider;
 use crate::app::dispatch::Worker;
 use crate::app::loader::ImageLoader;
-use crate::app::models::{CardLayout, CardModel, CardSize};
+use crate::app::models::{CardKind, CardLayout, CardModel, CardSize};
+
+use gettextrs::ngettext;
 
 use gdk::prelude::*;
 use gtk::prelude::*;
@@ -360,7 +362,7 @@ impl CardWidget {
             //
             // Pick an icon that hints at the card kind: a heart for the Liked
             // Songs playlist, a generic music-note for anything else.
-            let icon_name = if model.card_kind() == crate::app::models::CardKind::Playlist
+            let icon_name = if model.card_kind() == CardKind::Playlist
                 && model.id().starts_with("__riff_liked")
             {
                 "emblem-favorite-symbolic"
@@ -383,14 +385,30 @@ impl CardWidget {
 /// Build the label shown under the title. In list rows this is "{Kind} • {subtitle}"
 /// (e.g. "Playlist • Daniel"); otherwise the raw subtitle. When the item has no
 /// subtitle (e.g. artists), just the kind is shown.
+///
+/// In list layout (`with_kind = true`) also appends the track count for albums and
+/// playlists when `track_count > 0`, e.g. "Playlist • Daniel • 42 songs".
+/// Artists and items with no kind never get a count suffix.
 fn compose_subtitle_label(model: &CardModel, with_kind: bool) -> String {
     let subtitle = model.subtitle();
     if !with_kind {
         return subtitle;
     }
+
+    // Build the count suffix for albums and playlists (never for artists).
+    let count = model.track_count();
+    let count_suffix = match model.card_kind() {
+        CardKind::Album | CardKind::Playlist if count > 0 => {
+            // ngettext! arg order: singular, plural, u32 for selection, format value
+            let s = ngettext!("{} song", "{} songs", count, count);
+            format!(" • {s}")
+        }
+        _ => String::new(),
+    };
+
     match model.card_kind().label() {
-        Some(kind) if subtitle.is_empty() => kind,
-        Some(kind) => format!("{kind} • {subtitle}"),
+        Some(kind) if subtitle.is_empty() => format!("{kind}{count_suffix}"),
+        Some(kind) => format!("{kind} • {subtitle}{count_suffix}"),
         None => subtitle,
     }
 }
