@@ -3,6 +3,12 @@ using Adw 1;
 
 template $SettingsWindow : Adw.PreferencesDialog {
   search-enabled: false;
+  // Force full-screen bottom-sheet on all screen sizes. Without this,
+  // AdwDialog.presentation-mode defaults to "auto", which only goes
+  // full-screen when the logical viewport is ≤ 450 px wide. On the phone
+  // at scale 2 (540 px logical) the dialog floats as a small centred
+  // window instead of filling the screen.
+  presentation-mode: bottom_sheet;
 
   Adw.PreferencesPage {
     Adw.PreferencesGroup {

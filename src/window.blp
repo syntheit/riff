@@ -70,22 +70,8 @@ Adw.ApplicationWindow window {
             tag: "tabs";
             can-pop: false;
 
-            child: Adw.ToolbarView {
-              [top]
-              Adw.HeaderBar {
-                show-title: false;
-
-                [end]
-                MenuButton user {
-                  icon-name: "open-menu-symbolic";
-                  focus-on-click: false;
-                  can-focus: false;
-                }
-              }
-
-              content: Adw.ViewStack tab_stack {
-                vexpand: true;
-              };
+            child: Adw.ViewStack tab_stack {
+              vexpand: true;
             };
           }
         }
@@ -106,9 +92,25 @@ Adw.ApplicationWindow window {
       }
 
       // Bottom tab bar (Home / Search / Library), always visible.
-      Adw.ViewSwitcherBar tab_bar {
-        stack: tab_stack;
-        reveal: true;
+      // The ⋯ menu button lives here too: the top HeaderBar was removed to
+      // eliminate the dead-space strip between the system top bar and the
+      // app's content on GNOME Shell Mobile.
+      Box {
+        orientation: horizontal;
+
+        Adw.ViewSwitcherBar tab_bar {
+          stack: tab_stack;
+          reveal: true;
+          hexpand: true;
+        }
+
+        MenuButton user {
+          icon-name: "open-menu-symbolic";
+          focus-on-click: false;
+          can-focus: false;
+          valign: center;
+          margin-end: 12;
+        }
       }
     };
 
