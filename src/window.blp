@@ -5,11 +5,12 @@ Adw.ApplicationWindow window {
   default-width: 1080;
   default-height: 720;
 
-  // Queue overlay. Sits above everything (including the open player) as a
-  // partial-height card that dims the player behind it — like Spotify's queue.
-  // Opened by the player's queue button; swipe down or tap the dimmed player to
-  // dismiss back to the player.
-  Adw.BottomSheet queue_sheet {
+  // Add-to-playlist overlay. Outermost sheet so it appears over everything
+  // including the player and queue. Opened programmatically via ShowAddToPlaylist.
+  Adw.BottomSheet add_to_playlist_sheet {
+    modal: true;
+
+    content: Adw.BottomSheet queue_sheet {
     modal: true;
 
     content: Adw.BottomSheet now_playing_sheet {
@@ -121,6 +122,21 @@ Adw.ApplicationWindow window {
       height-request: 600;
 
       Adw.Bin queue_host {
+        vexpand: true;
+      }
+    }
+    };
+
+    // The add-to-playlist drawer. Hosted in a Bin so the component can swap
+    // content when a different song is targeted. The wrapping Box sets a fixed
+    // height (~75-80% of a typical phone screen) so the inner ScrolledWindow
+    // has room to expand — mirrors the queue sheet pattern above.
+    [sheet]
+    Box {
+      orientation: vertical;
+      height-request: 700;
+
+      Adw.Bin add_to_playlist_host {
         vexpand: true;
       }
     }

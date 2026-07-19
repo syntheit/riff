@@ -5,8 +5,8 @@ use gtk::prelude::*;
 
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
-use crate::app::state::{PlaybackAction, PlaybackEvent};
-use crate::app::{ActionDispatcher, AppEvent, AppModel, AppState, Worker};
+use crate::app::state::{BrowserEvent, PlaybackAction, PlaybackEvent};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
 
@@ -75,6 +75,24 @@ impl NowPlayingSheetModel {
     fn current_song(&self) -> Option<SongDescription> {
         self.state().playback.current_song()
     }
+
+    fn is_current_song_liked(&self) -> bool {
+        let state = self.state();
+        let Some(song) = state.playback.current_song() else {
+            return false;
+        };
+        state
+            .browser
+            .home_state()
+            .map(|h| h.saved_tracks.get(&song.id).is_some())
+            .unwrap_or(false)
+    }
+
+    fn show_add_to_playlist(&self) {
+        if let Some(song) = self.current_song() {
+            self.dispatcher.dispatch(AppAction::ShowAddToPlaylist(song));
+        }
+    }
 }
 
 pub struct NowPlayingSheet {
@@ -133,6 +151,11 @@ impl NowPlayingSheet {
             queue_sheet,
             move || set_sheet_open(&queue_sheet, true)
         ));
+        widget.connect_add_to_playlist(clone!(
+            #[weak]
+            model,
+            move || model.show_add_to_playlist()
+        ));
         widget.connect_close(clone!(
             #[weak]
             sheet,
@@ -187,6 +210,7 @@ impl EventListener for NowPlayingSheet {
             AppEvent::PlaybackEvent(PlaybackEvent::TrackChanged(_)) => {
                 self.last_position = 0;
                 self.widget.set_playing(self.model.is_playing());
+                self.widget.set_liked(self.model.is_current_song_liked());
                 self.update_current_info();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::PlaybackStopped) => {
@@ -198,8 +222,12 @@ impl EventListener for NowPlayingSheet {
                 self.last_position = *pos;
                 self.widget.set_seek_position(*pos as f64);
             }
+            AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated) => {
+                self.widget.set_liked(self.model.is_current_song_liked());
+            }
             AppEvent::NowPlayingSheetShown => {
                 self.sync_all();
+                self.widget.set_liked(self.model.is_current_song_liked());
                 set_sheet_open(&self.sheet, true);
             }
             _ => {}

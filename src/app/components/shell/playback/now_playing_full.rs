@@ -42,6 +42,12 @@ mod imp {
         pub queue_button: TemplateChild<gtk::Button>,
 
         #[template_child]
+        pub add_to_playlist_button: TemplateChild<gtk::Button>,
+
+        #[template_child]
+        pub add_to_playlist_icon: TemplateChild<gtk::Image>,
+
+        #[template_child]
         pub close_button: TemplateChild<gtk::Button>,
 
         pub clock: Clock,
@@ -190,6 +196,33 @@ impl NowPlayingFullWidget {
 
     pub fn connect_queue<F: Fn() + 'static>(&self, f: F) {
         self.imp().queue_button.connect_clicked(move |_| f());
+    }
+
+    pub fn connect_add_to_playlist<F: Fn() + 'static>(&self, f: F) {
+        self.imp()
+            .add_to_playlist_button
+            .connect_clicked(move |_| f());
+    }
+
+    // Update the +/check button appearance based on liked state.
+    // Liked → green filled circle with check. Not liked → gray circle with +.
+    pub fn set_liked(&self, liked: bool) {
+        let imp = self.imp();
+        if liked {
+            imp.add_to_playlist_icon
+                .set_icon_name(Some("object-select-symbolic"));
+            imp.add_to_playlist_button
+                .add_css_class("add-to-playlist-liked");
+            imp.add_to_playlist_button
+                .remove_css_class("add-to-playlist-unliked");
+        } else {
+            imp.add_to_playlist_icon
+                .set_icon_name(Some("list-add-symbolic"));
+            imp.add_to_playlist_button
+                .remove_css_class("add-to-playlist-liked");
+            imp.add_to_playlist_button
+                .add_css_class("add-to-playlist-unliked");
+        }
     }
 
     pub fn connect_close<F: Fn() + 'static>(&self, f: F) {

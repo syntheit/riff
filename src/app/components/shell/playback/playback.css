@@ -69,3 +69,20 @@
 .mini-player-art {
   border-radius: 4px;
 }
+
+.add-to-playlist-btn {
+  min-width: 40px;
+  min-height: 40px;
+}
+
+.add-to-playlist-unliked {
+  background: none;
+  border: 2px solid alpha(currentColor, 0.4);
+  color: alpha(currentColor, 0.6);
+}
+
+.add-to-playlist-liked {
+  background-color: #1db954;
+  color: white;
+  border: none;
+}

@@ -122,6 +122,12 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
+            App::make_add_to_playlist(
+                builder,
+                Rc::clone(model),
+                dispatcher.box_clone(),
+                worker.clone(),
+            ),
             App::make_login(builder, dispatcher.box_clone()),
             App::make_navigation(
                 builder,
@@ -257,6 +263,18 @@ impl App {
         let queue = Queue::new(model, worker);
         host.set_child(Some(queue.get_root_widget()));
         Box::new(queue)
+    }
+
+    fn make_add_to_playlist(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
+    ) -> Box<impl EventListener> {
+        let host: libadwaita::Bin = builder.object("add_to_playlist_host").unwrap();
+        let sheet: gtk::Widget = builder.object("add_to_playlist_sheet").unwrap();
+        let model = AddToPlaylistModel::new(app_model, dispatcher);
+        Box::new(AddToPlaylist::new(model, host, sheet, worker))
     }
 
     fn make_user_menu(

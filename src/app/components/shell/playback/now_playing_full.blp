@@ -119,16 +119,31 @@ template $NowPlayingFullWidget : Adw.Bin {
         halign: center;
       }
 
-      Button queue_button {
+      Box {
         halign: center;
+        spacing: 16;
 
-        styles [
-          "flat",
-        ]
+        Button add_to_playlist_button {
+          styles [
+            "circular",
+            "add-to-playlist-btn",
+          ]
 
-        Adw.ButtonContent {
-          icon-name: "music-queue-symbolic";
-          label: _("Queue");
+          Image add_to_playlist_icon {
+            icon-name: "list-add-symbolic";
+            pixel-size: 20;
+          }
+        }
+
+        Button queue_button {
+          styles [
+            "flat",
+          ]
+
+          Adw.ButtonContent {
+            icon-name: "music-queue-symbolic";
+            label: _("Queue");
+          }
         }
       }
     };

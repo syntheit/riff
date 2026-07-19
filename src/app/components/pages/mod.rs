@@ -1,3 +1,6 @@
+mod add_to_playlist;
+pub use add_to_playlist::*;
+
 mod details_album;
 pub use details_album::*;
 
