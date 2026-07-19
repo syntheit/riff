@@ -1,10 +1,9 @@
-use gettextrs::gettext;
 use std::ops::Deref;
 use std::rc::Rc;
 
 use crate::app::components::EventListener;
 use crate::app::models::*;
-use crate::app::state::{LoginEvent, PlaybackAction, PlaybackEvent, SelectionEvent};
+use crate::app::state::{BrowserEvent, PlaybackAction, PlaybackEvent, SelectionEvent};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
 
 use super::playback_widget::PlaybackWidget;
@@ -74,21 +73,22 @@ impl PlaybackModel {
             .dispatch(PlaybackAction::SetVolume(value).into())
     }
 
-    fn user_playlists(&self) -> impl Deref<Target = Vec<PlaylistSummary>> + '_ {
-        self.app_model.map_state(|s| &s.logged_user.playlists)
+    fn is_current_song_liked(&self) -> bool {
+        let state = self.state();
+        let Some(song) = state.playback.current_song() else {
+            return false;
+        };
+        state
+            .browser
+            .home_state()
+            .map(|h| h.saved_tracks.get(&song.id).is_some())
+            .unwrap_or(false)
     }
 
-    fn add_current_to_playlist(&self, playlist_id: &str) {
-        let uri = match self.current_song() {
-            Some(song) => song.uri,
-            None => return,
-        };
-        let api = self.app_model.get_spotify();
-        let id = playlist_id.to_string();
-        self.dispatcher.call_spotify_and_dispatch(move || async move {
-            api.add_to_playlist(&id, vec![uri]).await?;
-            Ok(AppAction::ShowNotification(gettext("Added to playlist")))
-        });
+    fn show_add_to_playlist(&self) {
+        if let Some(song) = self.current_song() {
+            self.dispatcher.dispatch(AppAction::ShowAddToPlaylist(song));
+        }
     }
 }
 
@@ -136,6 +136,11 @@ impl PlaybackControl {
             #[weak]
             model,
             move || model.open_now_playing_sheet()
+        ));
+        widget.connect_add_to_playlist(clone!(
+            #[weak]
+            model,
+            move || model.show_add_to_playlist()
         ));
         widget.connect_volume_changed(clone!(
             #[weak]
@@ -198,6 +203,7 @@ impl EventListener for PlaybackControl {
             AppEvent::PlaybackEvent(PlaybackEvent::TrackChanged(_)) => {
                 self.update_playing();
                 self.update_current_info();
+                self.widget.set_liked(self.model.is_current_song_liked());
             }
             AppEvent::PlaybackEvent(PlaybackEvent::PlaybackStopped) => {
                 self.update_playing();
@@ -213,16 +219,8 @@ impl EventListener for PlaybackControl {
             AppEvent::PlaybackEvent(PlaybackEvent::VolumeSet(value)) => {
                 self.widget.set_volume(*value)
             }
-            AppEvent::LoginEvent(LoginEvent::UserPlaylistsLoaded) => {
-                let model = &self.model;
-                self.widget.connect_add_playlists(
-                    &model.user_playlists(),
-                    clone!(
-                        #[weak]
-                        model,
-                        move |id| model.add_current_to_playlist(id)
-                    ),
-                );
+            AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated) => {
+                self.widget.set_liked(self.model.is_current_song_liked());
             }
             _ => {}
         }

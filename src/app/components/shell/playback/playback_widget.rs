@@ -1,4 +1,3 @@
-use gio::{Menu, SimpleAction, SimpleActionGroup};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, CompositeTemplate};
@@ -7,7 +6,7 @@ use std::cell::RefCell;
 use crate::app::components::display_add_css_provider;
 use crate::app::components::utils::{format_duration, Clock, Debouncer};
 use crate::app::loader::ImageLoader;
-use crate::app::models::{PlaylistSummary, RepeatMode};
+use crate::app::models::RepeatMode;
 use crate::app::Worker;
 
 use super::playback_controls::PlaybackControlsWidget;
@@ -40,7 +39,10 @@ mod imp {
         pub mobile_artist: TemplateChild<gtk::Label>,
 
         #[template_child]
-        pub mobile_add: TemplateChild<gtk::MenuButton>,
+        pub mobile_add: TemplateChild<gtk::Button>,
+
+        #[template_child]
+        pub mobile_add_icon: TemplateChild<gtk::Image>,
 
         #[template_child]
         pub mobile_play_pause: TemplateChild<gtk::Button>,
@@ -251,39 +253,25 @@ impl PlaybackWidget {
         widget.open_cb.replace(Some(Box::new(f)));
     }
 
-    /// Populate the mini-player's "add to playlist" menu with the user's playlists.
-    pub fn connect_add_playlists<F>(&self, playlists: &[PlaylistSummary], on_selected: F)
-    where
-        F: Fn(&str) + Clone + 'static,
-    {
-        // Don't rebuild the menu while it's open (playlists can change elsewhere).
-        if self
-            .imp()
-            .mobile_add
-            .popover()
-            .is_some_and(|p| p.is_visible())
-        {
-            return;
+    /// Wire the mini-player "+/check" button to open the add-to-playlist drawer.
+    pub fn connect_add_to_playlist<F: Fn() + 'static>(&self, f: F) {
+        self.imp().mobile_add.connect_clicked(move |_| f());
+    }
+
+    /// Update the +/check button appearance based on liked state.
+    /// Liked → green filled circle with check. Not liked → gray circle with +.
+    pub fn set_liked(&self, liked: bool) {
+        let imp = self.imp();
+        if liked {
+            imp.mobile_add_icon
+                .set_icon_name(Some("object-select-symbolic"));
+            imp.mobile_add.add_css_class("add-to-playlist-liked");
+            imp.mobile_add.remove_css_class("add-to-playlist-unliked");
+        } else {
+            imp.mobile_add_icon.set_icon_name(Some("list-add-symbolic"));
+            imp.mobile_add.remove_css_class("add-to-playlist-liked");
+            imp.mobile_add.add_css_class("add-to-playlist-unliked");
         }
-        let menu = Menu::new();
-        let action_group = SimpleActionGroup::new();
-        for PlaylistSummary { title, id } in playlists {
-            let action_name = format!("playlist_{id}");
-            action_group.add_action(&{
-                let id = id.clone();
-                let action = SimpleAction::new(&action_name, None);
-                let f = on_selected.clone();
-                action.connect_activate(move |_, _| f(&id));
-                action
-            });
-            menu.append(Some(title), Some(&format!("add_to.{action_name}")));
-        }
-        let popover = gtk::PopoverMenu::from_model(Some(&menu));
-        let widget = self.imp();
-        widget.mobile_add.set_popover(Some(&popover));
-        widget
-            .mobile_add
-            .insert_action_group("add_to", Some(&action_group));
     }
 
     pub fn connect_seek<Seek>(&self, seek: Seek)

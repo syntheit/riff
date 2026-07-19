@@ -196,17 +196,21 @@ template $PlaybackWidget : Box {
             }
           }
 
-          MenuButton mobile_add {
-            icon-name: "list-add-symbolic";
+          Button mobile_add {
             valign: center;
             focus-on-click: false;
             can-focus: false;
             tooltip-text: _("Add to playlist");
 
             styles [
-              "flat",
               "circular",
+              "add-to-playlist-btn",
             ]
+
+            Image mobile_add_icon {
+              icon-name: "list-add-symbolic";
+              pixel-size: 20;
+            }
           }
 
           Button mobile_play_pause {
