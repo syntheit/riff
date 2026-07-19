@@ -80,7 +80,9 @@ impl Queue {
             .label(gettext("Queue"))
             .css_classes(["title-3"])
             .xalign(0.5)
-            .margin_top(12)
+            // Clear the AdwBottomSheet drag-handle pill, which is drawn centered
+            // at the very top of the sheet and would otherwise overlap the title.
+            .margin_top(28)
             .margin_bottom(8)
             .margin_start(16)
             .margin_end(16)
