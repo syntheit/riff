@@ -535,6 +535,12 @@ fn build_drawer_ui(
                     .map(|m| m.title().to_lowercase().contains(&needle))
                     .unwrap_or(false)
             });
+            // set_filter_func does not itself notify the FilterListModel; without
+            // this the model never re-evaluates, so clearing the query leaves the
+            // list stuck on the previous (empty) result. Different forces a full
+            // re-filter, which correctly re-includes every row when the query is
+            // empty and re-narrows when it is not.
+            filter.changed(gtk::FilterChange::Different);
         }
     ));
 
@@ -660,11 +666,11 @@ fn fetch_membership_for_row(
     staged_removes: &Rc<RefCell<HashSet<String>>>,
 ) {
     let id = row_model.id();
-    let Some(snapshot) = row_model.snapshot_id() else {
-        // No snapshot to key on — treat as not-in and don't persist.
-        row_model.set_membership(Membership::NotIn);
-        return;
-    };
+    // A missing snapshot only means we cannot key a *persistent* cache entry; the
+    // membership itself is still worth resolving. Fetch anyway and just skip the
+    // disk write when there is no snapshot, rather than silently declaring the
+    // track NotIn (which would permanently hide a legitimate checkmark).
+    let snapshot = row_model.snapshot_id();
 
     let api = api.clone();
     let cache = cache.clone();
@@ -674,18 +680,26 @@ fn fetch_membership_for_row(
     let staged_adds = staged_adds.clone();
     let staged_removes = staged_removes.clone();
 
+    error!("ATPDBG2 fetch called for {id} (snapshot={snapshot:?})");
+
     worker.send_local_task(async move {
         let ids = match api.get_playlist_track_ids(&id).await {
             Ok(ids) => ids,
             Err(e) => {
-                error!("add-to-playlist: membership fetch for {id} failed: {e:?}");
+                error!("ATPDBG2 fetch for {id} FAILED: {e:?}");
                 return;
             }
         };
         let set: HashSet<String> = ids.into_iter().collect();
         let contains = set.contains(&song_id);
-        cache.borrow_mut().insert(id.clone(), snapshot, set);
-        cache.schedule_save();
+        error!(
+            "ATPDBG2 fetch result {id}: {} tracks, song_id={song_id}, contains={contains}",
+            set.len()
+        );
+        if let Some(snapshot) = snapshot {
+            cache.borrow_mut().insert(id.clone(), snapshot, set);
+            cache.schedule_save();
+        }
 
         // The model is unique per playlist, so recording its membership is always
         // correct even if the widget it was bound to has since been recycled.
@@ -700,9 +714,15 @@ fn fetch_membership_for_row(
             // recycled across playlists as the user scrolls; refreshing a row that
             // has moved on would flip the wrong checkbox.
             if let Some(row) = weak_row.upgrade() {
-                if row.bound_id() == id {
+                let bound = row.bound_id();
+                let pass = bound == id;
+                error!("ATPDBG2 guard {id}: bound_id={bound} pass={pass}");
+                if pass {
                     row.refresh_checkbox(&model, &staged_adds, &staged_removes);
+                    error!("ATPDBG2 checkbox refreshed for {id} (contains={contains})");
                 }
+            } else {
+                error!("ATPDBG2 row gone for {id}, cache-only update");
             }
         }
     });
