@@ -252,6 +252,14 @@ impl AddToPlaylist {
                 .collect()
         };
 
+        let with_snap = playlists.iter().filter(|p| p.snapshot_id.is_some()).count();
+        error!(
+            "ATPDBG refresh: {} playlists, {} with snapshot_id, {} need fetch",
+            playlists.len(),
+            with_snap,
+            to_fetch.len()
+        );
+
         if to_fetch.is_empty() {
             return;
         }
@@ -264,8 +272,15 @@ impl AddToPlaylist {
                     return;
                 }
 
-                let Ok(ids) = api.get_playlist_track_ids(&playlist_id).await else {
-                    continue;
+                let ids = match api.get_playlist_track_ids(&playlist_id).await {
+                    Ok(ids) => {
+                        error!("ATPDBG indexed {playlist_id} -> {} tracks", ids.len());
+                        ids
+                    }
+                    Err(e) => {
+                        error!("ATPDBG fetch {playlist_id} failed: {e:?}");
+                        continue;
+                    }
                 };
 
                 index_rc.borrow_mut().insert(
@@ -299,6 +314,11 @@ impl AddToPlaylist {
                     .map(|p| p.id.clone())
                     .collect()
             };
+
+            error!(
+                "ATPDBG redraw: initially_contains={}",
+                initially_contains.len()
+            );
 
             build_drawer_ui(
                 &song,
