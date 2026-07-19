@@ -1,15 +1,18 @@
+mod membership_cache;
+use membership_cache::SharedMembershipCache;
+
 use gettextrs::gettext;
 use gtk::prelude::*;
 use libadwaita::prelude::BinExt;
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::api::SpotifyApiClient;
 use crate::app::components::{Component, EventListener};
 use crate::app::loader::ImageLoader;
-use crate::app::models::{ImageSet, PlaylistDescription, SongDescription};
+use crate::app::models::{PlaylistDescription, SongDescription};
 use crate::app::state::{BrowserEvent, LoginEvent};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, Worker};
 
@@ -27,10 +30,13 @@ enum SortMode {
     Default,
 }
 
-// Per-playlist membership index entry. Keyed by playlist id.
-struct PlaylistIndexEntry {
-    snapshot_id: String,
-    track_ids: HashSet<String>,
+// Membership state of the target track in a given playlist row.
+// Drives whether the checkbox may be shown and pre-checked.
+#[derive(Clone, Copy, PartialEq)]
+enum Membership {
+    Unknown,
+    In,
+    NotIn,
 }
 
 pub struct AddToPlaylistModel {
@@ -97,29 +103,82 @@ impl AddToPlaylistModel {
                     .map(AppAction::CreatePlaylist)
             });
     }
-
-    fn add_to_playlist(&self, playlist_id: String, uri: String) {
-        let api = self.app_model.get_spotify();
-        self.dispatcher
-            .call_spotify_and_dispatch_many(move || async move {
-                api.add_to_playlist(&playlist_id, vec![uri]).await?;
-                Ok(vec![AppAction::ShowNotification(gettext(
-                    "Added to playlist",
-                ))])
-            });
-    }
-
-    fn remove_from_playlist(&self, playlist_id: String, uri: String) {
-        let api = self.app_model.get_spotify();
-        self.dispatcher
-            .call_spotify_and_dispatch_many(move || async move {
-                api.remove_from_playlist(&playlist_id, vec![uri]).await?;
-                Ok(vec![])
-            });
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// GObject row model backing the virtualized ListView. One instance per playlist;
+// only rows scrolled into view are ever bound to a widget, and art/membership are
+// resolved lazily on bind. Properties are read/written directly by the factory.
+mod row_model {
+    use super::Membership;
+    use glib::prelude::*;
+    use glib::subclass::prelude::*;
+    use glib::Properties;
+    use std::cell::{Cell, RefCell};
+
+    glib::wrapper! {
+        pub struct PlaylistRowModel(ObjectSubclass<imp::PlaylistRowModel>);
+    }
+
+    impl PlaylistRowModel {
+        pub fn new(id: &str, title: &str, art: Option<&str>, snapshot_id: Option<&str>) -> Self {
+            glib::Object::builder()
+                .property("id", id)
+                .property("title", title)
+                .property("art", art.map(str::to_owned))
+                .property("snapshot-id", snapshot_id.map(str::to_owned))
+                .build()
+        }
+
+        pub(super) fn membership(&self) -> Membership {
+            match self.imp().membership.get() {
+                1 => Membership::In,
+                2 => Membership::NotIn,
+                _ => Membership::Unknown,
+            }
+        }
+
+        pub(super) fn set_membership(&self, membership: Membership) {
+            self.imp().membership.set(match membership {
+                Membership::Unknown => 0,
+                Membership::In => 1,
+                Membership::NotIn => 2,
+            });
+        }
+    }
+
+    mod imp {
+        use super::*;
+
+        #[derive(Default, Properties)]
+        #[properties(wrapper_type = super::PlaylistRowModel)]
+        pub struct PlaylistRowModel {
+            #[property(get, set)]
+            pub id: RefCell<String>,
+            #[property(get, set)]
+            pub title: RefCell<String>,
+            #[property(get, set)]
+            pub art: RefCell<Option<String>>,
+            #[property(get, set, name = "snapshot-id")]
+            pub snapshot_id: RefCell<Option<String>>,
+            // 0 = Unknown, 1 = In, 2 = NotIn. Backed by a plain Cell rather than a
+            // property because it is read/written imperatively, never bound.
+            pub membership: Cell<i32>,
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for PlaylistRowModel {
+            const NAME: &'static str = "AddToPlaylistRowModel";
+            type Type = super::PlaylistRowModel;
+            type ParentType = glib::Object;
+        }
+
+        #[glib::derived_properties]
+        impl ObjectImpl for PlaylistRowModel {}
+    }
+}
+use row_model::PlaylistRowModel;
 
 pub struct AddToPlaylist {
     model: Rc<AddToPlaylistModel>,
@@ -135,13 +194,9 @@ pub struct AddToPlaylist {
     /// Playlist ids seen at the last build_for() call. Used to detect
     /// newly-created playlists (via UserPlaylistsLoaded) for auto-staging.
     known_playlist_ids: RefCell<HashSet<String>>,
-    /// Snapshot-id-keyed track membership index. Persists across songs so
-    /// unchanged playlists are never re-fetched within an app session.
-    membership_index: Rc<RefCell<HashMap<String, PlaylistIndexEntry>>>,
-    /// Monotonically increasing counter bumped each time the drawer opens for
-    /// a new song. Background refresh tasks carry the token they were launched
-    /// with; if it no longer matches, the result is discarded.
-    session_token: Rc<Cell<u64>>,
+    /// Snapshot-id-keyed track membership cache, persisted to disk. Shared with
+    /// the lazy per-row fetch tasks and the Save diff.
+    cache: SharedMembershipCache,
 }
 
 impl AddToPlaylist {
@@ -160,8 +215,7 @@ impl AddToPlaylist {
             staged_adds: Rc::new(RefCell::new(HashSet::new())),
             staged_removes: Rc::new(RefCell::new(HashSet::new())),
             known_playlist_ids: RefCell::new(HashSet::new()),
-            membership_index: Rc::new(RefCell::new(HashMap::new())),
-            session_token: Rc::new(Cell::new(0)),
+            cache: SharedMembershipCache::load(),
         }
     }
 
@@ -181,177 +235,38 @@ impl AddToPlaylist {
             *known = current_ids;
         }
 
-        // Membership comes from the snapshot-id-cached index. Playlists not yet
-        // indexed show as not-containing the song until the background refresh
-        // completes and triggers a rebuild.
-        let initially_contains: HashSet<String> = {
-            let index = self.membership_index.borrow();
-            playlists
-                .iter()
-                .filter(|p| {
-                    index
-                        .get(&p.id)
-                        .is_some_and(|e| e.track_ids.contains(&song.id))
-                })
-                .map(|p| p.id.clone())
-                .collect()
-        };
-
         build_drawer_ui(
             song,
             &playlists,
-            initially_contains,
             &self.sheet,
             &self.host,
             &self.model,
             &self.worker,
             &self.staged_adds,
             &self.staged_removes,
+            &self.cache,
         );
-    }
-
-    /// Kick off a background refresh of the membership index.
-    /// For each playlist, re-fetches track ids only when snapshot_id changed
-    /// (or the playlist has no entry yet). Unchanged playlists are free.
-    /// Discards the result if the session token changed (drawer re-targeted).
-    /// Does NOT touch staged_adds/staged_removes.
-    fn refresh_membership_index(
-        &self,
-        song: SongDescription,
-        playlists: Vec<PlaylistDescription>,
-        api: Arc<dyn SpotifyApiClient + Send + Sync>,
-    ) {
-        let index_rc = self.membership_index.clone();
-        let session_token = self.session_token.clone();
-        let my_token = session_token.get();
-        let sheet = self.sheet.clone();
-
-        // host is the Bin that contains the drawer root built by build_for.
-        // After the refresh we call build_drawer_ui again; to do that without a
-        // self reference in the async block we store the inputs we need.
-        let model_rc = self.model.clone();
-        let worker = self.worker.clone();
-        let host = self.host.clone();
-        let staged_adds = self.staged_adds.clone();
-        let staged_removes = self.staged_removes.clone();
-
-        // Collect which playlists need re-fetching before entering the async block.
-        let to_fetch: Vec<(String, String)> = {
-            let index = index_rc.borrow();
-            playlists
-                .iter()
-                .filter_map(|p| {
-                    let snap = p.snapshot_id.as_deref()?;
-                    let needs_fetch = index.get(&p.id).is_none_or(|e| e.snapshot_id != snap);
-                    if needs_fetch {
-                        Some((p.id.clone(), snap.to_owned()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        };
-
-        let with_snap = playlists.iter().filter(|p| p.snapshot_id.is_some()).count();
-        error!(
-            "ATPDBG refresh: {} playlists, {} with snapshot_id, {} need fetch",
-            playlists.len(),
-            with_snap,
-            to_fetch.len()
-        );
-
-        if to_fetch.is_empty() {
-            return;
-        }
-
-        self.worker.send_local_task(async move {
-            for (playlist_id, snapshot_id) in to_fetch {
-                // If the sheet was closed or the user moved to a different song,
-                // discard remaining fetches for this session.
-                if session_token.get() != my_token || !sheet.property::<bool>("open") {
-                    return;
-                }
-
-                let ids = match api.get_playlist_track_ids(&playlist_id).await {
-                    Ok(ids) => {
-                        error!("ATPDBG indexed {playlist_id} -> {} tracks", ids.len());
-                        ids
-                    }
-                    Err(e) => {
-                        error!("ATPDBG fetch {playlist_id} failed: {e:?}");
-                        continue;
-                    }
-                };
-
-                index_rc.borrow_mut().insert(
-                    playlist_id,
-                    PlaylistIndexEntry {
-                        snapshot_id,
-                        track_ids: ids.into_iter().collect(),
-                    },
-                );
-            }
-
-            // Session still valid — rebuild the drawer so membership checkmarks
-            // and the "Saved in" section reflect the freshly indexed data.
-            // staged_adds/staged_removes live on their Rc handles and are untouched.
-            if session_token.get() != my_token || !sheet.property::<bool>("open") {
-                return;
-            }
-
-            // Rebuild the playlist list and compute membership from the updated index.
-            let playlists_now = model_rc.user_playlists();
-            let initially_contains: HashSet<String> = {
-                let index = index_rc.borrow();
-                let song_id = &song.id;
-                playlists_now
-                    .iter()
-                    .filter(|p| {
-                        index
-                            .get(&p.id)
-                            .is_some_and(|e| e.track_ids.contains(song_id))
-                    })
-                    .map(|p| p.id.clone())
-                    .collect()
-            };
-
-            error!(
-                "ATPDBG redraw: initially_contains={}",
-                initially_contains.len()
-            );
-
-            build_drawer_ui(
-                &song,
-                &playlists_now,
-                initially_contains,
-                &sheet,
-                &host,
-                &model_rc,
-                &worker,
-                &staged_adds,
-                &staged_removes,
-            );
-        });
     }
 }
 
-// Shared drawer layout. Called by both build_for (via self) and the async
-// refresh path. All state that differs between the two call-sites is passed
-// as explicit arguments so there is exactly one copy of the widget tree.
+// Shared drawer layout. All state that varies between calls is passed explicitly
+// so there is exactly one copy of the widget tree.
 #[allow(clippy::too_many_arguments)]
 fn build_drawer_ui(
     song: &SongDescription,
     playlists: &[PlaylistDescription],
-    initially_contains: HashSet<String>,
     sheet: &gtk::Widget,
     host: &libadwaita::Bin,
     model: &Rc<AddToPlaylistModel>,
     worker: &Worker,
     staged_adds: &Rc<RefCell<HashSet<String>>>,
     staged_removes: &Rc<RefCell<HashSet<String>>>,
+    cache: &SharedMembershipCache,
 ) {
+    let song_id = song.id.clone();
     let song_uri = song.uri.clone();
     let sort_mode: Rc<Cell<SortMode>> = Rc::new(Cell::new(SortMode::Alphabetical));
+    let api = model.app_model.get_spotify();
 
     // ── Root layout ──────────────────────────────────────────────────────────
     let root = gtk::Box::builder()
@@ -397,7 +312,10 @@ fn build_drawer_ui(
         .margin_start(16)
         .margin_end(16)
         .build();
-    track_row.append(&art_thumbnail(song.art.as_ref(), worker));
+    track_row.append(&art_thumbnail(
+        song.art.as_ref().and_then(|s| s.best_for_width(48)),
+        worker,
+    ));
     track_row.append(&song_text_box(&song.title, &song.artists_name()));
     root.append(&track_row);
     root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
@@ -426,32 +344,14 @@ fn build_drawer_ui(
     toolbar.append(&sort_drop);
     root.append(&toolbar);
 
-    // Scrollable list
-    let list_box = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_top(4)
-        .margin_bottom(24)
-        .build();
-    let clamp = libadwaita::Clamp::builder()
-        .maximum_size(600)
-        .child(&list_box)
-        .build();
-    let scroll = gtk::ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vexpand(true)
-        .child(&clamp)
-        .build();
-    root.append(&scroll);
-
-    // ── "New playlist" row ────────────────────────────────────────────────────
+    // ── "New playlist" row (sits above the virtualized list) ──────────────────
     let new_row = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
         .margin_top(4)
         .margin_bottom(4)
+        .margin_start(12)
+        .margin_end(12)
         .build();
     let new_icon = gtk::Image::builder()
         .icon_name("list-add-symbolic")
@@ -498,119 +398,159 @@ fn build_drawer_ui(
         }
     });
 
-    list_box.append(&new_btn);
-    list_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    let new_btn_wrap = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    new_btn_wrap.append(&new_btn);
+    new_btn_wrap.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+    root.append(&new_btn_wrap);
 
-    // ── "Saved in" section ────────────────────────────────────────────────────
-    // Populated from the membership index; shows real membership once the
-    // background refresh finishes and the next build is triggered.
-    if !initially_contains.is_empty() {
-        let saved_label = gtk::Label::builder()
-            .label(gettext("Saved in"))
-            .xalign(0.0)
-            .margin_top(8)
-            .margin_bottom(4)
-            .css_classes(["heading"])
-            .build();
-        list_box.append(&saved_label);
-        for pl in playlists
-            .iter()
-            .filter(|p| initially_contains.contains(&p.id))
-        {
-            let row = playlist_row(
-                pl,
-                true,
-                worker,
-                staged_adds.clone(),
-                staged_removes.clone(),
-                &initially_contains,
-            );
-            list_box.append(&row);
-        }
-        let sep = gtk::Separator::new(gtk::Orientation::Horizontal);
-        sep.set_margin_top(8);
-        sep.set_margin_bottom(4);
-        list_box.append(&sep);
+    // ── Virtualized playlist list ─────────────────────────────────────────────
+    // Backing store holds one lightweight GObject per playlist. A FilterListModel
+    // applies the live search text; a SortListModel applies the sort order. The
+    // ListView only realizes rows in view, so art and membership are resolved
+    // lazily, per visible row, in the factory's bind callback.
+    let store = gio::ListStore::new::<PlaylistRowModel>();
+    for pl in playlists {
+        store.append(&PlaylistRowModel::new(
+            &pl.id,
+            &pl.title,
+            pl.art.as_ref().and_then(|s| s.best_for_width(48)),
+            pl.snapshot_id.as_deref(),
+        ));
     }
 
-    // ── Filtered + sorted playlist list ───────────────────────────────────────
-    let all_playlists: Rc<Vec<PlaylistDescription>> = Rc::new(playlists.to_vec());
-    let initially_contains_rc = Rc::new(initially_contains.clone());
-    let list_container = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .build();
-    list_box.append(&list_container);
+    let filter = gtk::CustomFilter::new(|_| true);
+    let filter_model = gtk::FilterListModel::new(Some(store.clone()), Some(filter.clone()));
 
-    let rebuild_list = {
-        let all_playlists = all_playlists.clone();
-        let initially_contains_rc = initially_contains_rc.clone();
-        let staged_adds = staged_adds.clone();
-        let staged_removes = staged_removes.clone();
-        let sort_mode = sort_mode.clone();
-        let list_container = list_container.clone();
-        let worker = worker.clone();
-        let search_entry = search_entry.clone();
-        move || {
-            while let Some(child) = list_container.first_child() {
-                list_container.remove(&child);
+    let sorter = gtk::CustomSorter::new(clone!(
+        #[strong]
+        sort_mode,
+        move |a, b| {
+            if sort_mode.get() == SortMode::Default {
+                // Keep the store's natural (API fetch) order.
+                return gtk::Ordering::Equal;
             }
-            let filter = search_entry.text().to_lowercase();
-            let mut visible: Vec<&PlaylistDescription> = all_playlists
-                .iter()
-                .filter(|p| !initially_contains_rc.contains(&p.id))
-                .filter(|p| filter.is_empty() || p.title.to_lowercase().contains(&filter))
-                .collect();
-            if sort_mode.get() == SortMode::Alphabetical {
-                visible.sort_by(|a, b| a.title.cmp(&b.title));
+            let a = a.downcast_ref::<PlaylistRowModel>().unwrap().title();
+            let b = b.downcast_ref::<PlaylistRowModel>().unwrap().title();
+            a.to_lowercase().cmp(&b.to_lowercase()).into()
+        }
+    ));
+    let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
+
+    let selection = gtk::NoSelection::new(Some(sort_model));
+
+    let factory = gtk::SignalListItemFactory::new();
+    factory.connect_setup(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        item.set_child(Some(&PlaylistRow::new()));
+    });
+
+    factory.connect_bind(clone!(
+        #[strong]
+        worker,
+        #[strong]
+        cache,
+        #[strong]
+        staged_adds,
+        #[strong]
+        staged_removes,
+        #[strong]
+        api,
+        #[strong]
+        song_id,
+        move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let row_model = item.item().unwrap().downcast::<PlaylistRowModel>().unwrap();
+            let row = item.child().unwrap().downcast::<PlaylistRow>().unwrap();
+
+            let id = row_model.id();
+            let snapshot = row_model.snapshot_id();
+
+            // Resolve membership from the cache if we have a snapshot-matching
+            // entry; otherwise kick off a lazy fetch for just this playlist.
+            match cache.borrow().contains(&id, snapshot.as_deref(), &song_id) {
+                Some(true) => row_model.set_membership(Membership::In),
+                Some(false) => row_model.set_membership(Membership::NotIn),
+                None => row_model.set_membership(Membership::Unknown),
             }
-            // Default: retain the API's natural order (recent-activity proxy).
-            if visible.is_empty() {
-                list_container.append(
-                    &libadwaita::StatusPage::builder()
-                        .title(gettext("No playlists found"))
-                        .vexpand(true)
-                        .build(),
-                );
-                return;
-            }
-            for pl in visible {
-                let checked = staged_adds.borrow().contains(&pl.id);
-                let row = playlist_row(
-                    pl,
-                    checked,
+
+            row.bind(&row_model, &worker, &staged_adds, &staged_removes);
+
+            if row_model.membership() == Membership::Unknown {
+                fetch_membership_for_row(
                     &worker,
-                    staged_adds.clone(),
-                    staged_removes.clone(),
-                    &initially_contains_rc,
+                    &api,
+                    &cache,
+                    &row_model,
+                    &row,
+                    &song_id,
+                    &staged_adds,
+                    &staged_removes,
                 );
-                list_container.append(&row);
             }
         }
-    };
-    rebuild_list();
-    let rebuild_list = Rc::new(rebuild_list);
-
-    // Search filter
-    search_entry.connect_search_changed(clone!(
-        #[strong]
-        rebuild_list,
-        move |_| rebuild_list()
     ));
 
-    // Sort control
+    factory.connect_unbind(|_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        let row = item.child().unwrap().downcast::<PlaylistRow>().unwrap();
+        row.unbind();
+    });
+
+    let list_view = gtk::ListView::builder()
+        .model(&selection)
+        .factory(&factory)
+        .single_click_activate(false)
+        .css_classes(["add-to-playlist-list"])
+        .build();
+
+    let clamp = libadwaita::Clamp::builder()
+        .maximum_size(600)
+        .margin_start(12)
+        .margin_end(12)
+        .margin_bottom(24)
+        .child(&list_view)
+        .build();
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&clamp)
+        .build();
+    root.append(&scroll);
+
+    // ── Search filter ─────────────────────────────────────────────────────────
+    search_entry.connect_search_changed(clone!(
+        #[weak]
+        filter,
+        move |entry| {
+            let needle = entry.text().to_lowercase();
+            filter.set_filter_func(move |obj| {
+                if needle.is_empty() {
+                    return true;
+                }
+                obj.downcast_ref::<PlaylistRowModel>()
+                    .map(|m| m.title().to_lowercase().contains(&needle))
+                    .unwrap_or(false)
+            });
+        }
+    ));
+
+    // ── Sort control ──────────────────────────────────────────────────────────
     sort_drop.connect_selected_notify(clone!(
         #[strong]
         sort_mode,
-        #[strong]
-        rebuild_list,
+        #[weak]
+        sorter,
         move |drop| {
             sort_mode.set(if drop.selected() == 0 {
                 SortMode::Alphabetical
             } else {
                 SortMode::Default
             });
-            rebuild_list();
+            sorter.changed(gtk::SorterChange::Different);
         }
     ));
 
@@ -649,47 +589,133 @@ fn build_drawer_ui(
     cancel_btn.connect_clicked(move |_| set_sheet_open(&sheet_clone, false));
 
     // ── Save: apply the diff ──────────────────────────────────────────────────
-    // adds    = staged_adds  \ initially_contains
-    // removes = staged_removes ∩ initially_contains
-    let model_save = model.clone();
+    // Adds come from staged_adds, removes from staged_removes. For a checked
+    // playlist whose membership we never resolved, we fetch its track ids first
+    // and skip the add if the track is already present, so Save can never create
+    // a duplicate.
     let staged_adds_save = staged_adds.clone();
     let staged_removes_save = staged_removes.clone();
-    let initially_contains_save = initially_contains_rc.as_ref().clone();
+    let cache_save = cache.clone();
     let song_uri_save = song_uri;
+    let song_id_save = song_id;
     let sheet_save = sheet.clone();
+    let api_save = api.clone();
+    let worker_save = worker.clone();
     save_btn.connect_clicked(move |_| {
         set_sheet_open(&sheet_save, false);
-        let adds: Vec<String> = staged_adds_save
-            .borrow()
-            .iter()
-            .filter(|id| !initially_contains_save.contains(*id))
-            .cloned()
-            .collect();
-        let removes: Vec<String> = staged_removes_save
-            .borrow()
-            .iter()
-            .filter(|id| initially_contains_save.contains(*id))
-            .cloned()
-            .collect();
-        for pid in adds {
-            model_save.add_to_playlist(pid, song_uri_save.clone());
-        }
-        for pid in removes {
-            model_save.remove_from_playlist(pid, song_uri_save.clone());
-        }
+
+        let adds: Vec<String> = staged_adds_save.borrow().iter().cloned().collect();
+        let removes: Vec<String> = staged_removes_save.borrow().iter().cloned().collect();
+
+        let api = api_save.clone();
+        let cache = cache_save.clone();
+        let song_uri = song_uri_save.clone();
+        let song_id = song_id_save.clone();
+        worker_save.send_local_task(async move {
+            for pid in adds {
+                // If we already know the track is present, adding again would
+                // duplicate it — skip. If membership is unknown, fetch first.
+                let known = cache.borrow().track_ids(&pid).map(|s| s.contains(&song_id));
+                let already_in = match known {
+                    Some(present) => present,
+                    None => match api.get_playlist_track_ids(&pid).await {
+                        Ok(ids) => ids.iter().any(|i| i == &song_id),
+                        Err(e) => {
+                            error!("add-to-playlist: fetch before add failed for {pid}: {e:?}");
+                            false
+                        }
+                    },
+                };
+                if already_in {
+                    continue;
+                }
+                if let Err(e) = api.add_to_playlist(&pid, vec![song_uri.clone()]).await {
+                    error!("add-to-playlist: add to {pid} failed: {e:?}");
+                }
+            }
+            for pid in removes {
+                if let Err(e) = api.remove_from_playlist(&pid, vec![song_uri.clone()]).await {
+                    error!("add-to-playlist: remove from {pid} failed: {e:?}");
+                }
+            }
+        });
     });
 
     host.set_child(Some(&root));
 }
 
+// Lazily fetch a single playlist's track ids, cache the result, then update the
+// (possibly-recycled) row. The fetch runs on the same local executor as art
+// loading, so it may touch widgets. The row/model are weak-referenced: if the
+// row was unbound before the fetch returns, only the cache is updated.
+#[allow(clippy::too_many_arguments)]
+fn fetch_membership_for_row(
+    worker: &Worker,
+    api: &Arc<dyn SpotifyApiClient + Send + Sync>,
+    cache: &SharedMembershipCache,
+    row_model: &PlaylistRowModel,
+    row: &PlaylistRow,
+    song_id: &str,
+    staged_adds: &Rc<RefCell<HashSet<String>>>,
+    staged_removes: &Rc<RefCell<HashSet<String>>>,
+) {
+    let id = row_model.id();
+    let Some(snapshot) = row_model.snapshot_id() else {
+        // No snapshot to key on — treat as not-in and don't persist.
+        row_model.set_membership(Membership::NotIn);
+        return;
+    };
+
+    let api = api.clone();
+    let cache = cache.clone();
+    let song_id = song_id.to_owned();
+    let weak_model = row_model.downgrade();
+    let weak_row = row.downgrade();
+    let staged_adds = staged_adds.clone();
+    let staged_removes = staged_removes.clone();
+
+    worker.send_local_task(async move {
+        let ids = match api.get_playlist_track_ids(&id).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!("add-to-playlist: membership fetch for {id} failed: {e:?}");
+                return;
+            }
+        };
+        let set: HashSet<String> = ids.into_iter().collect();
+        let contains = set.contains(&song_id);
+        cache.borrow_mut().insert(id.clone(), snapshot, set);
+        cache.schedule_save();
+
+        // The model is unique per playlist, so recording its membership is always
+        // correct even if the widget it was bound to has since been recycled.
+        if let Some(model) = weak_model.upgrade() {
+            model.set_membership(if contains {
+                Membership::In
+            } else {
+                Membership::NotIn
+            });
+
+            // Only touch the widget if it is STILL showing this playlist. Rows are
+            // recycled across playlists as the user scrolls; refreshing a row that
+            // has moved on would flip the wrong checkbox.
+            if let Some(row) = weak_row.upgrade() {
+                if row.bound_id() == id {
+                    row.refresh_checkbox(&model, &staged_adds, &staged_removes);
+                }
+            }
+        }
+    });
+}
+
 // ── Widget helpers ────────────────────────────────────────────────────────────
 
-fn art_thumbnail(art: Option<&ImageSet>, worker: &Worker) -> gtk::Image {
+fn art_thumbnail(url: Option<&str>, worker: &Worker) -> gtk::Image {
     let image = gtk::Image::builder()
         .pixel_size(48)
         .valign(gtk::Align::Center)
         .build();
-    if let Some(url) = art.and_then(|s| s.best_for_width(48)).map(str::to_owned) {
+    if let Some(url) = url.map(str::to_owned) {
         let weak = image.downgrade();
         worker.send_local_task(async move {
             if let Some(img) = weak.upgrade() {
@@ -728,52 +754,205 @@ fn song_text_box(title: &str, artist: &str) -> gtk::Box {
     b
 }
 
-fn playlist_row(
-    pl: &PlaylistDescription,
-    checked: bool,
-    worker: &Worker,
-    staged_adds: Rc<RefCell<HashSet<String>>>,
-    staged_removes: Rc<RefCell<HashSet<String>>>,
-    initially_contains: &HashSet<String>,
-) -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Horizontal)
-        .spacing(12)
-        .margin_top(4)
-        .margin_bottom(4)
-        .build();
-    row.append(&art_thumbnail(pl.art.as_ref(), worker));
-    row.append(
-        &gtk::Label::builder()
-            .label(&pl.title)
-            .hexpand(true)
-            .xalign(0.0)
-            .ellipsize(gtk::pango::EllipsizeMode::End)
-            .build(),
-    );
-    let check = gtk::CheckButton::builder()
-        .active(checked)
-        .valign(gtk::Align::Center)
-        .build();
-    let id = pl.id.clone();
-    let was_in_initial = initially_contains.contains(&pl.id);
-    check.connect_toggled(move |btn| {
-        let now = btn.is_active();
-        if now {
-            staged_removes.borrow_mut().remove(&id);
-            if !was_in_initial {
-                staged_adds.borrow_mut().insert(id.clone());
+// ── Reusable playlist row widget ──────────────────────────────────────────────
+// One instance is created per realized ListView slot and recycled across
+// playlists via bind/unbind. It owns its own art image, name label and checkbox
+// and tracks the currently-bound playlist id plus the checkbox's toggle handler.
+mod playlist_row {
+    use super::Membership;
+    use super::PlaylistRowModel;
+    use gtk::glib;
+    use gtk::prelude::*;
+    use gtk::subclass::prelude::*;
+    use std::cell::RefCell;
+    use std::collections::HashSet;
+    use std::rc::Rc;
+
+    glib::wrapper! {
+        pub struct PlaylistRow(ObjectSubclass<imp::PlaylistRow>)
+            @extends gtk::Box, gtk::Widget,
+            @implements gtk::Orientable;
+    }
+
+    impl Default for PlaylistRow {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+
+    impl PlaylistRow {
+        pub fn new() -> Self {
+            glib::Object::new()
+        }
+
+        // Bind this recycled row to a playlist: set label, load art lazily and
+        // pre-check the box from the staged state / known membership.
+        pub fn bind(
+            &self,
+            model: &PlaylistRowModel,
+            worker: &crate::app::Worker,
+            staged_adds: &Rc<RefCell<HashSet<String>>>,
+            staged_removes: &Rc<RefCell<HashSet<String>>>,
+        ) {
+            let imp = self.imp();
+            let id = model.id();
+            imp.bound_id.replace(id.clone());
+
+            imp.label.set_label(&model.title());
+
+            // Load art lazily for this row only. Clear first so the recycled
+            // widget never shows the previous playlist's cover.
+            imp.art.set_paintable(gdk::Paintable::NONE);
+            if let Some(url) = model.art() {
+                let weak = imp.art.downgrade();
+                let expected = id.clone();
+                let row_weak = self.downgrade();
+                worker.send_local_task(async move {
+                    let loader = crate::app::loader::ImageLoader::new();
+                    if let Some(pixbuf) = loader.load_remote(&url, "jpg", 48, 48).await {
+                        // Skip if the row was recycled onto another playlist.
+                        let still_bound = row_weak
+                            .upgrade()
+                            .map(|r| *r.imp().bound_id.borrow() == expected)
+                            .unwrap_or(false);
+                        if still_bound {
+                            if let Some(img) = weak.upgrade() {
+                                img.set_paintable(Some(&gdk::Texture::for_pixbuf(&pixbuf)));
+                            }
+                        }
+                    }
+                });
             }
-        } else {
-            staged_adds.borrow_mut().remove(&id);
-            if was_in_initial {
-                staged_removes.borrow_mut().insert(id.clone());
+
+            self.refresh_checkbox(model, staged_adds, staged_removes);
+
+            // Wire the toggle so checking/unchecking updates the staged sets. The
+            // handler resolves membership at click time to decide add vs remove.
+            let check = imp.check.clone();
+            let id_for_toggle = id.clone();
+            let staged_adds = staged_adds.clone();
+            let staged_removes = staged_removes.clone();
+            let model_weak = model.downgrade();
+            let handler = check.connect_toggled(move |btn| {
+                let now = btn.is_active();
+                let was_in = model_weak
+                    .upgrade()
+                    .map(|m| m.membership() == Membership::In)
+                    .unwrap_or(false);
+                if now {
+                    staged_removes.borrow_mut().remove(&id_for_toggle);
+                    if !was_in {
+                        staged_adds.borrow_mut().insert(id_for_toggle.clone());
+                    }
+                } else {
+                    staged_adds.borrow_mut().remove(&id_for_toggle);
+                    if was_in {
+                        staged_removes.borrow_mut().insert(id_for_toggle.clone());
+                    }
+                }
+            });
+            imp.toggle_handler.replace(Some(handler));
+        }
+
+        // Recompute the checkbox state from staged sets + resolved membership,
+        // without emitting a toggle. Used on bind and after a lazy fetch resolves.
+        pub fn refresh_checkbox(
+            &self,
+            model: &PlaylistRowModel,
+            staged_adds: &Rc<RefCell<HashSet<String>>>,
+            staged_removes: &Rc<RefCell<HashSet<String>>>,
+        ) {
+            let imp = self.imp();
+            let id = model.id();
+            let checked = if staged_adds.borrow().contains(&id) {
+                true
+            } else if staged_removes.borrow().contains(&id) {
+                false
+            } else {
+                model.membership() == Membership::In
+            };
+
+            // Block the toggle handler so this programmatic update doesn't restage.
+            if let Some(handler) = imp.toggle_handler.borrow().as_ref() {
+                imp.check.block_signal(handler);
+                imp.check.set_active(checked);
+                imp.check.unblock_signal(handler);
+            } else {
+                imp.check.set_active(checked);
             }
         }
-    });
-    row.append(&check);
-    row
+
+        // The playlist id this row is currently bound to, or empty once unbound.
+        pub fn bound_id(&self) -> String {
+            self.imp().bound_id.borrow().clone()
+        }
+
+        pub fn unbind(&self) {
+            let imp = self.imp();
+            if let Some(handler) = imp.toggle_handler.take() {
+                imp.check.disconnect(handler);
+            }
+            imp.art.set_paintable(gdk::Paintable::NONE);
+            imp.bound_id.replace(String::new());
+        }
+    }
+
+    mod imp {
+        use super::*;
+        use gtk::glib::SignalHandlerId;
+
+        pub struct PlaylistRow {
+            pub art: gtk::Image,
+            pub label: gtk::Label,
+            pub check: gtk::CheckButton,
+            pub bound_id: RefCell<String>,
+            pub toggle_handler: RefCell<Option<SignalHandlerId>>,
+        }
+
+        impl Default for PlaylistRow {
+            fn default() -> Self {
+                Self {
+                    art: gtk::Image::builder().pixel_size(48).build(),
+                    label: gtk::Label::builder()
+                        .hexpand(true)
+                        .xalign(0.0)
+                        .ellipsize(gtk::pango::EllipsizeMode::End)
+                        .build(),
+                    check: gtk::CheckButton::builder()
+                        .valign(gtk::Align::Center)
+                        .build(),
+                    bound_id: RefCell::new(String::new()),
+                    toggle_handler: RefCell::new(None),
+                }
+            }
+        }
+
+        #[glib::object_subclass]
+        impl ObjectSubclass for PlaylistRow {
+            const NAME: &'static str = "AddToPlaylistRow";
+            type Type = super::PlaylistRow;
+            type ParentType = gtk::Box;
+        }
+
+        impl ObjectImpl for PlaylistRow {
+            fn constructed(&self) {
+                self.parent_constructed();
+                let obj = self.obj();
+                obj.set_orientation(gtk::Orientation::Horizontal);
+                obj.set_spacing(12);
+                obj.set_margin_top(4);
+                obj.set_margin_bottom(4);
+                obj.append(&self.art);
+                obj.append(&self.label);
+                obj.append(&self.check);
+            }
+        }
+
+        impl WidgetImpl for PlaylistRow {}
+        impl BoxImpl for PlaylistRow {}
+    }
 }
+use playlist_row::PlaylistRow;
 
 // ── Component + EventListener ─────────────────────────────────────────────────
 
@@ -802,16 +981,8 @@ impl EventListener for AddToPlaylist {
                     *self.known_playlist_ids.borrow_mut() = current_ids;
                 }
 
-                // Bump the session token so any in-flight refresh for the
-                // previous song discards its results.
-                self.session_token.set(self.session_token.get() + 1);
-
                 *self.current_song.borrow_mut() = Some(song.clone());
                 self.build_for(song);
-
-                let playlists = self.model.user_playlists();
-                let api = self.model.app_model.get_spotify();
-                self.refresh_membership_index(song.clone(), playlists, api);
 
                 set_sheet_open(&self.sheet, true);
             }
@@ -823,9 +994,6 @@ impl EventListener for AddToPlaylist {
                 if let Some(song) = self.current_song.borrow().clone() {
                     if self.sheet.property::<bool>("open") {
                         self.build_for(&song);
-                        let playlists = self.model.user_playlists();
-                        let api = self.model.app_model.get_spotify();
-                        self.refresh_membership_index(song.clone(), playlists, api);
                     }
                 }
             }
