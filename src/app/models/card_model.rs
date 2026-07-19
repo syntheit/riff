@@ -10,11 +10,72 @@ use std::{
     cell::{Cell, Ref, RefCell},
 };
 
+/// The kind of item a card represents, used for the "Type • subtitle" row
+/// label and for filtering in the unified library view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardKind {
+    #[default]
+    None,
+    Album,
+    Playlist,
+    Artist,
+}
+
+impl CardKind {
+    /// Translatable label shown before the subtitle in compact list rows.
+    pub fn label(self) -> Option<String> {
+        match self {
+            Self::None => None,
+            // Translators: item type shown in library list rows, e.g. "Album • Artist"
+            Self::Album => Some(gettext("Album")),
+            // Translators: item type shown in library list rows, e.g. "Playlist • Owner"
+            Self::Playlist => Some(gettext("Playlist")),
+            // Translators: item type shown in library list rows
+            Self::Artist => Some(gettext("Artist")),
+        }
+    }
+
+    fn to_u8(self) -> u8 {
+        self as u8
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => Self::Album,
+            2 => Self::Playlist,
+            3 => Self::Artist,
+            _ => Self::None,
+        }
+    }
+}
+
 glib::wrapper! {
     pub struct CardModel(ObjectSubclass<imp::CardModel>);
 }
 
 impl CardModel {
+    /// Set the item kind (album/playlist/artist) for library list rows.
+    pub fn with_kind(self, kind: CardKind) -> Self {
+        self.set_property("kind", kind.to_u8() as u32);
+        self
+    }
+
+    /// Set the number of tracks, used by the "Largest" sort. 0 sorts last.
+    pub fn with_track_count(self, count: u32) -> Self {
+        self.set_property("track-count", count);
+        self
+    }
+
+    /// Set whether the artwork should render round (followed artists).
+    pub fn with_round_image(self, round: bool) -> Self {
+        self.set_property("is-round", round);
+        self
+    }
+
+    pub fn card_kind(&self) -> CardKind {
+        CardKind::from_u8(self.property::<u32>("kind") as u8)
+    }
+
     pub fn new(
         id: &str,
         image: Option<&String>,
@@ -89,6 +150,15 @@ mod imp {
         insertion_position: Cell<u32>,
         #[property(get, set, name = "snapshot-id")]
         snapshot_id: RefCell<Option<String>>,
+        /// Number of tracks in this item (playlist/album). 0 = unknown/artist.
+        #[property(get, set, name = "track-count")]
+        track_count: Cell<u32>,
+        /// Item type as a `CardKind` discriminant (see `CardModel::card_kind`).
+        #[property(get, set)]
+        kind: Cell<u32>,
+        /// Whether the artwork renders round (followed artists) vs square.
+        #[property(get, set, name = "is-round")]
+        is_round: Cell<bool>,
 
         pub data: RefCell<Option<Box<dyn Any + 'static>>>,
     }

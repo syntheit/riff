@@ -32,6 +32,8 @@ impl From<&AlbumDescription> for CardModel {
             Some(album.popularity),
             None,
         )
+        .with_kind(CardKind::Album)
+        .with_track_count(album.songs.batch.total as u32)
     }
 }
 
@@ -57,6 +59,8 @@ impl From<&PlaylistDescription> for CardModel {
             None,
             None,
         )
+        .with_kind(CardKind::Playlist)
+        .with_track_count(playlist.songs.batch.total as u32)
         .with_snapshot_id(playlist.snapshot_id.clone())
     }
 }
@@ -101,6 +105,8 @@ impl From<&ArtistSummary> for CardModel {
             Some(artist.popularity),
             None,
         )
+        .with_kind(CardKind::Artist)
+        .with_round_image(true)
     }
 }
 

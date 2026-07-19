@@ -148,7 +148,7 @@ impl BrowserScreen {
                 BrowserScreen::PlaylistDetails(Box::new(PlaylistDetailsState::new(id.to_string())))
             }
             ScreenName::User(id) => BrowserScreen::User(Box::new(UserState::new(id.to_string()))),
-            ScreenName::Settings => {
+            ScreenName::SavedTracks | ScreenName::Settings => {
                 BrowserScreen::Stateless(Box::new(StatelessScreen { name: name.clone() }))
             }
         }

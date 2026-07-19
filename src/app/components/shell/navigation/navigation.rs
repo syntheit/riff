@@ -45,7 +45,7 @@ impl Navigation {
         }
         let home = Box::new(self.screen_factory.make_library());
         let search = Box::new(self.screen_factory.make_search_results());
-        let library = Box::new(super::home::LibraryPane::new(&self.screen_factory));
+        let library = Box::new(self.screen_factory.make_library_screen());
 
         self.tab_stack.add_titled_with_icon(
             home.get_root_widget(),
@@ -88,6 +88,7 @@ impl Navigation {
                 Box::new(self.screen_factory.make_playlist_details(id.to_owned()))
             }
             ScreenName::User(id) => Box::new(self.screen_factory.make_user_details(id.to_owned())),
+            ScreenName::SavedTracks => Box::new(self.screen_factory.make_saved_tracks()),
             ScreenName::Settings => Box::new(self.screen_factory.make_settings()),
             // Home is the tab shell (never pushed); Search is a persistent tab.
             ScreenName::Home | ScreenName::Search => return,

@@ -19,6 +19,9 @@ impl SavedTracks {
         let mut component =
             DetailsPageComponent::new(model.clone(), model.to_headerbar_model(), worker);
         component.create_playlist(None);
+        // Pushed on demand (from the library's Liked Songs row), after the
+        // login event has already passed, so prime the track list now.
+        model.load_initial();
 
         Self { model, component }
     }

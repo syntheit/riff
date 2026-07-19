@@ -275,5 +275,14 @@
       <default>'recently-added'</default>
       <summary>Sort order for saved artists page</summary>
     </key>
+    <key name="sort-library" type="s">
+      <choices>
+        <choice value='recently-added'/>
+        <choice value='alphabetic'/>
+        <choice value='size'/>
+      </choices>
+      <default>'recently-added'</default>
+      <summary>Sort order for the unified library page</summary>
+    </key>
   </schema>
 </schemalist>

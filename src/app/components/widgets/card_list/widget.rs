@@ -295,6 +295,10 @@ impl Drop for CardList {
 }
 
 /// Create a FlowBoxChild for a real card model.
+///
+/// `shape` is the list's default; a card that opts into a round image (followed
+/// artists) overrides it so mixed lists render artist avatars round while albums
+/// and playlists stay square.
 fn create_child(
     card: &CardModel,
     worker: &Worker,
@@ -302,6 +306,11 @@ fn create_child(
     layout: CardLayout,
     size: CardSize,
 ) -> gtk::FlowBoxChild {
+    let shape = if card.is_round() {
+        ImageShape::Round
+    } else {
+        shape
+    };
     let widget = CardWidget::for_model(card, worker.clone(), shape, layout, size);
     let child = gtk::FlowBoxChild::new();
     child.set_halign(gtk::Align::Fill);
@@ -382,5 +391,15 @@ fn compare_cards(sort: SortOrder, a: &CardModel, b: &CardModel) -> Ordering {
             .cmp(&b.subtitle().to_ascii_lowercase()),
         SortOrder::DateReleased => b.release_date().cmp(&a.release_date()),
         SortOrder::Popularity => b.popularity().cmp(&a.popularity()),
+        SortOrder::Size => {
+            // Largest first; items with an unknown count (0) always sort last.
+            let (a_count, b_count) = (a.track_count(), b.track_count());
+            match (a_count, b_count) {
+                (0, 0) => Ordering::Equal,
+                (0, _) => Ordering::Greater,
+                (_, 0) => Ordering::Less,
+                _ => b_count.cmp(&a_count),
+            }
+        }
     }
 }

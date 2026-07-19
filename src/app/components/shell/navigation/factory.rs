@@ -41,10 +41,12 @@ impl ScreenFactory {
         screen
     }
 
+    /// The "Home" tab. Currently a saved-albums grid (kept functional as-is);
+    /// the redesigned unified library lives under the Library tab.
     pub fn make_library(&self) -> impl ListenerComponent {
         let model = SavedAlbumsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
         let screen_model = DefaultHeaderBarModel::new(
-            Some(gettext("Library")),
+            Some(gettext("Home")),
             None,
             Rc::clone(&self.app_model),
             self.dispatcher.box_clone(),
@@ -59,11 +61,31 @@ impl ScreenFactory {
         Self::make_card_page(page, screen_model)
     }
 
+    /// The unified Spotify-style "Your Library" screen (filter pills + sort +
+    /// grid/list toggle over saved albums/playlists/artists).
+    pub fn make_library_screen(&self) -> impl ListenerComponent {
+        let model = Rc::new(LibraryModel::new(
+            Rc::clone(&self.app_model),
+            self.dispatcher.box_clone(),
+        ));
+        LibraryScreen::new(
+            model,
+            self.worker.clone(),
+            Rc::clone(&self.shared_layout),
+            Rc::clone(&self.shared_size),
+            Rc::clone(&self.dispatcher),
+        )
+    }
+
     pub fn make_sidebar(&self, listbox: gtk::ListBox) -> impl ListenerComponent {
         let model = SidebarModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
         Sidebar::new(listbox, Rc::new(model))
     }
 
+    // The standalone saved-playlists / saved-artists grids are superseded by the
+    // unified library screen's filter pills, but kept as ready-to-mount detail
+    // targets (and to preserve their page modules).
+    #[allow(dead_code)]
     pub fn make_saved_playlists(&self) -> impl ListenerComponent {
         let model =
             SavedPlaylistsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
@@ -83,6 +105,7 @@ impl ScreenFactory {
         Self::make_card_page(page, screen_model)
     }
 
+    #[allow(dead_code)]
     pub fn make_saved_artists(&self) -> impl ListenerComponent {
         let model = SavedArtistsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
         let screen_model = DefaultHeaderBarModel::new(

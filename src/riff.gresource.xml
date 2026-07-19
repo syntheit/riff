@@ -7,6 +7,8 @@
     <file>skeleton_override.css</file>
     <!-- login -->
     <file alias="components/login.ui">app/components/pages/login/login.ui</file>
+    <!-- library -->
+    <file alias="components/library.css">app/components/pages/library/library.css</file>
     <!-- settings -->
     <file alias="components/settings.ui">app/components/pages/settings/settings.ui</file>
     <file alias="components/equalizer.ui">app/components/pages/settings/equalizer.ui</file>

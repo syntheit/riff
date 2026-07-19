@@ -297,10 +297,14 @@ impl CardWidget {
             return;
         }
 
+        // In list (horizontal) layout, prefix the subtitle with the item type,
+        // Spotify-style: "Playlist • Owner". Grid/other layouts keep it bare.
+        let compose_subtitle = imp.layout.get() == CardLayout::Horizontal;
+
         if let Some(url) = model.image() {
             let weak = self.downgrade();
             let title = model.title();
-            let subtitle = model.subtitle();
+            let subtitle = compose_subtitle_label(model, compose_subtitle);
             let position = model.insertion_position();
 
             let load = async move {
@@ -337,16 +341,25 @@ impl CardWidget {
                 .bind_property("title", &*imp.title_label, "label")
                 .flags(glib::BindingFlags::DEFAULT | glib::BindingFlags::SYNC_CREATE)
                 .build();
-            model
-                .bind_property("subtitle", &*imp.subtitle_label, "label")
-                .flags(glib::BindingFlags::DEFAULT | glib::BindingFlags::SYNC_CREATE)
-                .build();
-            model
-                .bind_property("subtitle", &*imp.subtitle_label, "visible")
-                .flags(glib::BindingFlags::DEFAULT | glib::BindingFlags::SYNC_CREATE)
-                .transform_to(|_, subtitle: String| Some(!subtitle.is_empty()))
-                .build();
+            let subtitle = compose_subtitle_label(model, compose_subtitle);
+            imp.subtitle_label.set_label(&subtitle);
+            imp.subtitle_label.set_visible(!subtitle.is_empty());
             self.set_loaded();
         }
+    }
+}
+
+/// Build the label shown under the title. In list rows this is "{Kind} • {subtitle}"
+/// (e.g. "Playlist • Daniel"); otherwise the raw subtitle. When the item has no
+/// subtitle (e.g. artists), just the kind is shown.
+fn compose_subtitle_label(model: &CardModel, with_kind: bool) -> String {
+    let subtitle = model.subtitle();
+    if !with_kind {
+        return subtitle;
+    }
+    match model.card_kind().label() {
+        Some(kind) if subtitle.is_empty() => kind,
+        Some(kind) => format!("{kind} • {subtitle}"),
+        None => subtitle,
     }
 }

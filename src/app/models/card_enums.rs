@@ -16,10 +16,11 @@ pub enum SortOrder {
     Creator = 2,
     DateReleased = 3,
     Popularity = 4,
+    Size = 5,
 }
 
 impl SortOrder {
-    const COUNT: u8 = 5;
+    const COUNT: u8 = 6;
 
     /// GSettings-compatible string key for this sort order.
     pub fn to_str(self) -> &'static str {
@@ -29,6 +30,7 @@ impl SortOrder {
             Self::Creator => "creator",
             Self::DateReleased => "date-released",
             Self::Popularity => "popularity",
+            Self::Size => "size",
         }
     }
 
@@ -39,6 +41,7 @@ impl SortOrder {
             "creator" => Self::Creator,
             "date-released" => Self::DateReleased,
             "popularity" => Self::Popularity,
+            "size" => Self::Size,
             _ => Self::RecentlyAdded,
         }
     }
@@ -56,6 +59,8 @@ impl SortOrder {
             Self::DateReleased => gettext("Date Released"),
             // Translators: Sort option — order by popularity score (highest first)
             Self::Popularity => gettext("Popularity"),
+            // Translators: Sort option — order by number of tracks (largest first)
+            Self::Size => gettext("Largest"),
         }
     }
 

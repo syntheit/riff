@@ -1,0 +1,21 @@
+.library-title {
+  font-size: 1.7rem;
+  font-weight: 800;
+}
+
+/* Filter pills: accent-filled when checked, muted otherwise. */
+.library-pill {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.library-pill:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.library-pill-clear {
+  min-width: 24px;
+  min-height: 24px;
+  padding: 0;
+}
