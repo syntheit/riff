@@ -1,5 +1,5 @@
 mod membership_cache;
-use membership_cache::SharedMembershipCache;
+use membership_cache::{OwnedPlaylist, SharedMembershipCache};
 
 use gettextrs::gettext;
 use gtk::prelude::*;
@@ -7,14 +7,18 @@ use libadwaita::prelude::BinExt;
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
-use std::sync::Arc;
 
-use crate::api::SpotifyApiClient;
 use crate::app::components::{Component, EventListener};
 use crate::app::loader::ImageLoader;
-use crate::app::models::{PlaylistDescription, SongDescription};
+use crate::app::models::SongDescription;
 use crate::app::state::{BrowserEvent, LoginEvent};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, Worker};
+
+// The sync walks owned playlists one at a time (awaiting each fetch) so it never
+// starves the GTK main-loop executor, which also serves art loads and UI tasks.
+// The open drawer is rebuilt every this-many freshly-indexed playlists so
+// checkmarks appear steadily rather than after every single fetch.
+const SYNC_REBUILD_BATCH: usize = 4;
 
 fn set_sheet_open(sheet: &gtk::Widget, open: bool) {
     sheet.set_property("open", open);
@@ -30,15 +34,6 @@ enum SortMode {
     Default,
 }
 
-// Membership state of the target track in a given playlist row.
-// Drives whether the checkbox may be shown and pre-checked.
-#[derive(Clone, Copy, PartialEq)]
-enum Membership {
-    Unknown,
-    In,
-    NotIn,
-}
-
 pub struct AddToPlaylistModel {
     app_model: Rc<AppModel>,
     dispatcher: Box<dyn ActionDispatcher>,
@@ -50,41 +45,6 @@ impl AddToPlaylistModel {
             app_model,
             dispatcher,
         }
-    }
-
-    fn user_playlists(&self) -> Vec<PlaylistDescription> {
-        let state = self.app_model.get_state();
-        let Some(home) = state.browser.home_state() else {
-            return vec![];
-        };
-        let browser = &state.browser;
-        home.playlists
-            .iter()
-            .map(|card| {
-                let id = card.id();
-                if let Some(pds) = browser.playlist_details_state(&id) {
-                    if let Some(pl) = pds.playlist.as_ref() {
-                        return pl.clone();
-                    }
-                }
-                PlaylistDescription {
-                    id,
-                    title: card.title(),
-                    art: card.image().and_then(|url| {
-                        crate::app::models::ImageSet::from_images(std::iter::once((
-                            Some(300u32),
-                            url,
-                        )))
-                    }),
-                    songs: crate::app::models::SongBatch::empty(),
-                    owner: crate::app::models::UserRef {
-                        id: String::new(),
-                        display_name: String::new(),
-                    },
-                    snapshot_id: card.snapshot_id(),
-                }
-            })
-            .collect()
     }
 
     fn user_id(&self) -> Option<String> {
@@ -107,11 +67,12 @@ impl AddToPlaylistModel {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
-// GObject row model backing the virtualized ListView. One instance per playlist;
-// only rows scrolled into view are ever bound to a widget, and art/membership are
-// resolved lazily on bind. Properties are read/written directly by the factory.
+// GObject row model backing the virtualized ListView. One instance per owned
+// playlist; only rows scrolled into view are ever bound to a widget, and art is
+// loaded lazily on bind. Membership is resolved synchronously from the shared index
+// when the store is built (no fetch on bind), and carried on the `in-playlist`
+// property so a recycled widget always reflects the right playlist.
 mod row_model {
-    use super::Membership;
     use glib::prelude::*;
     use glib::subclass::prelude::*;
     use glib::Properties;
@@ -122,29 +83,20 @@ mod row_model {
     }
 
     impl PlaylistRowModel {
-        pub fn new(id: &str, title: &str, art: Option<&str>, snapshot_id: Option<&str>) -> Self {
+        pub fn new(
+            id: &str,
+            title: &str,
+            art: Option<&str>,
+            snapshot_id: Option<&str>,
+            in_playlist: bool,
+        ) -> Self {
             glib::Object::builder()
                 .property("id", id)
                 .property("title", title)
                 .property("art", art.map(str::to_owned))
                 .property("snapshot-id", snapshot_id.map(str::to_owned))
+                .property("in-playlist", in_playlist)
                 .build()
-        }
-
-        pub(super) fn membership(&self) -> Membership {
-            match self.imp().membership.get() {
-                1 => Membership::In,
-                2 => Membership::NotIn,
-                _ => Membership::Unknown,
-            }
-        }
-
-        pub(super) fn set_membership(&self, membership: Membership) {
-            self.imp().membership.set(match membership {
-                Membership::Unknown => 0,
-                Membership::In => 1,
-                Membership::NotIn => 2,
-            });
         }
     }
 
@@ -162,9 +114,9 @@ mod row_model {
             pub art: RefCell<Option<String>>,
             #[property(get, set, name = "snapshot-id")]
             pub snapshot_id: RefCell<Option<String>>,
-            // 0 = Unknown, 1 = In, 2 = NotIn. Backed by a plain Cell rather than a
-            // property because it is read/written imperatively, never bound.
-            pub membership: Cell<i32>,
+            // Whether the target song is in this playlist per the shared index.
+            #[property(get, set, name = "in-playlist")]
+            pub in_playlist: Cell<bool>,
         }
 
         #[glib::object_subclass]
@@ -185,7 +137,7 @@ pub struct AddToPlaylist {
     worker: Worker,
     sheet: gtk::Widget,
     host: libadwaita::Bin,
-    current_song: RefCell<Option<SongDescription>>,
+    current_song: Rc<RefCell<Option<SongDescription>>>,
     /// Pending adds: playlist ids checked during this session.
     /// Persists across build_for() rebuilds. Cleared only for a new song.
     staged_adds: Rc<RefCell<HashSet<String>>>,
@@ -193,9 +145,9 @@ pub struct AddToPlaylist {
     staged_removes: Rc<RefCell<HashSet<String>>>,
     /// Playlist ids seen at the last build_for() call. Used to detect
     /// newly-created playlists (via UserPlaylistsLoaded) for auto-staging.
-    known_playlist_ids: RefCell<HashSet<String>>,
-    /// Snapshot-id-keyed track membership cache, persisted to disk. Shared with
-    /// the lazy per-row fetch tasks and the Save diff.
+    known_playlist_ids: Rc<RefCell<HashSet<String>>>,
+    /// Owned-playlist list + snapshot-keyed membership index, persisted to disk and
+    /// filled by the background sync. Shared with the drawer rows and the Save diff.
     cache: SharedMembershipCache,
 }
 
@@ -211,42 +163,218 @@ impl AddToPlaylist {
             worker,
             sheet,
             host,
-            current_song: RefCell::new(None),
+            current_song: Rc::new(RefCell::new(None)),
             staged_adds: Rc::new(RefCell::new(HashSet::new())),
             staged_removes: Rc::new(RefCell::new(HashSet::new())),
-            known_playlist_ids: RefCell::new(HashSet::new()),
+            known_playlist_ids: Rc::new(RefCell::new(HashSet::new())),
             cache: SharedMembershipCache::load(),
         }
     }
 
     fn build_for(&self, song: &SongDescription) {
-        let playlists = self.model.user_playlists();
-
-        // Detect newly-created playlists and auto-stage them as adds.
-        // On the very first build_for for a song, known_playlist_ids has already
-        // been seeded with the current ids (done in on_event before calling here),
-        // so nothing is treated as "new" until the user actually creates one.
-        {
-            let current_ids: HashSet<String> = playlists.iter().map(|p| p.id.clone()).collect();
-            let mut known = self.known_playlist_ids.borrow_mut();
-            for new_id in current_ids.difference(&*known) {
-                self.staged_adds.borrow_mut().insert(new_id.clone());
-            }
-            *known = current_ids;
-        }
-
-        build_drawer_ui(
+        rebuild_drawer(
             song,
-            &playlists,
             &self.sheet,
             &self.host,
             &self.model,
             &self.worker,
             &self.staged_adds,
             &self.staged_removes,
+            &self.known_playlist_ids,
             &self.cache,
         );
     }
+
+    // Kick the background sync: resolve the owned playlists from the authoritative
+    // owner ids, then walk them sequentially to fill the index. Rebuilds the (open)
+    // drawer as data lands so checkmarks converge live. Skipped while one is already
+    // in flight so overlapping login events can't race two walks.
+    fn start_sync(&self) {
+        if self.cache.is_syncing() {
+            return;
+        }
+        let rebuild = self.rebuild_closure();
+        sync_owned_playlists(
+            self.model.app_model.clone(),
+            self.worker.clone(),
+            self.cache.clone(),
+            rebuild,
+        );
+    }
+
+    // A cheap-to-clone closure that rebuilds the drawer for the current song when
+    // it is open. Handed to the background sync so it can refresh as it progresses.
+    fn rebuild_closure(&self) -> Rc<dyn Fn()> {
+        let sheet = self.sheet.clone();
+        let host = self.host.clone();
+        let model = self.model.clone();
+        let worker = self.worker.clone();
+        let staged_adds = self.staged_adds.clone();
+        let staged_removes = self.staged_removes.clone();
+        let known_playlist_ids = self.known_playlist_ids.clone();
+        let cache = self.cache.clone();
+        let current_song = self.current_song.clone();
+        Rc::new(move || {
+            let Some(song) = current_song.borrow().clone() else {
+                return;
+            };
+            if !sheet.property::<bool>("open") {
+                return;
+            }
+            rebuild_drawer(
+                &song,
+                &sheet,
+                &host,
+                &model,
+                &worker,
+                &staged_adds,
+                &staged_removes,
+                &known_playlist_ids,
+                &cache,
+            );
+        })
+    }
+}
+
+// Rebuild the drawer for a song from the owned-playlist list, auto-staging any
+// newly-created playlists. Shared by build_for and the sync's live refresh.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_drawer(
+    song: &SongDescription,
+    sheet: &gtk::Widget,
+    host: &libadwaita::Bin,
+    model: &Rc<AddToPlaylistModel>,
+    worker: &Worker,
+    staged_adds: &Rc<RefCell<HashSet<String>>>,
+    staged_removes: &Rc<RefCell<HashSet<String>>>,
+    known_playlist_ids: &Rc<RefCell<HashSet<String>>>,
+    cache: &SharedMembershipCache,
+) {
+    // Only playlists the user owns are listed — those are the ones you can add to,
+    // and the ones the sync indexes. The list comes from the shared cache, populated
+    // by the sync from the authoritative owner ids.
+    let playlists = cache.owned_playlists();
+
+    // Detect newly-created playlists and auto-stage them as adds. On the first
+    // build for a song, known_playlist_ids has been seeded with the current ids
+    // (done in on_event), so nothing is treated as "new" until the user creates one.
+    {
+        let current_ids: HashSet<String> = playlists.iter().map(|p| p.id.clone()).collect();
+        let mut known = known_playlist_ids.borrow_mut();
+        for new_id in current_ids.difference(&*known) {
+            staged_adds.borrow_mut().insert(new_id.clone());
+        }
+        *known = current_ids;
+    }
+
+    build_drawer_ui(
+        song,
+        &playlists,
+        sheet,
+        host,
+        model,
+        worker,
+        staged_adds,
+        staged_removes,
+        cache,
+    );
+}
+
+// Background library index. Runs once per session on the local executor: pull the
+// user's saved playlists, keep only the ones they own (owner.id == logged user),
+// publish that list for the drawer, then walk them SEQUENTIALLY filling the track
+// index. Snapshot-fresh entries are skipped for free, so after the first sync only
+// changed playlists are re-fetched. Awaiting each fetch keeps the GTK main loop
+// responsive; the drawer is rebuilt as data lands so checkmarks converge live.
+fn sync_owned_playlists(
+    app_model: Rc<AppModel>,
+    worker: Worker,
+    cache: SharedMembershipCache,
+    rebuild: Rc<dyn Fn()>,
+) {
+    let Some(user_id) = app_model.get_state().logged_user.user.clone() else {
+        return;
+    };
+    let api = app_model.get_spotify();
+
+    cache.set_syncing(true);
+    rebuild();
+
+    worker.send_local_task(async move {
+        // Resolve the owned playlists from the authoritative saved-playlists list,
+        // which carries owner ids (the home cards drop them).
+        const PAGE: usize = 50;
+        let mut owned: Vec<OwnedPlaylist> = Vec::new();
+        let mut offset = 0usize;
+        loop {
+            let batch = match api.get_saved_playlists(offset, PAGE).await {
+                Ok(batch) => batch,
+                Err(e) => {
+                    error!("add-to-playlist: saved playlists fetch failed: {e:?}");
+                    break;
+                }
+            };
+            let fetched = batch.len();
+            for pl in batch {
+                if pl.owner.id == user_id {
+                    owned.push(OwnedPlaylist {
+                        id: pl.id,
+                        title: pl.title,
+                        art: pl
+                            .art
+                            .as_ref()
+                            .and_then(|s| s.best_for_width(48))
+                            .map(str::to_owned),
+                        snapshot_id: pl.snapshot_id,
+                    });
+                }
+            }
+            offset += PAGE;
+            if fetched < PAGE {
+                break;
+            }
+        }
+
+        cache.set_owned_playlists(owned.clone());
+        rebuild();
+
+        // Walk the owned playlists one at a time. Snapshot-fresh entries are already
+        // indexed, so they cost nothing; the rest are fetched and merged in.
+        let mut done_since_rebuild = 0usize;
+        for pl in &owned {
+            let fresh = cache.index().is_fresh(&pl.id, pl.snapshot_id.as_deref());
+            if fresh {
+                continue;
+            }
+
+            let ids = match api.get_playlist_track_ids(&pl.id).await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    error!("add-to-playlist: track sync for {} failed: {e:?}", pl.id);
+                    continue;
+                }
+            };
+            let set: HashSet<String> = ids.into_iter().collect();
+
+            // Only a persistent (snapshot-keyed) entry can be skipped next launch; a
+            // playlist with no snapshot is still indexed for this session's checks.
+            let snapshot = pl.snapshot_id.clone().unwrap_or_default();
+            cache.index_mut().insert(pl.id.clone(), snapshot, set);
+            cache.schedule_save();
+
+            // Refresh the open drawer every few playlists rather than after each
+            // fetch, so checkmarks appear steadily without a rebuild storm.
+            done_since_rebuild += 1;
+            if done_since_rebuild >= SYNC_REBUILD_BATCH {
+                done_since_rebuild = 0;
+                rebuild();
+            }
+        }
+
+        cache.set_syncing(false);
+        cache.schedule_save();
+        rebuild();
+    });
 }
 
 // Shared drawer layout. All state that varies between calls is passed explicitly
@@ -254,7 +382,7 @@ impl AddToPlaylist {
 #[allow(clippy::too_many_arguments)]
 fn build_drawer_ui(
     song: &SongDescription,
-    playlists: &[PlaylistDescription],
+    playlists: &[OwnedPlaylist],
     sheet: &gtk::Widget,
     host: &libadwaita::Bin,
     model: &Rc<AddToPlaylistModel>,
@@ -408,18 +536,25 @@ fn build_drawer_ui(
     root.append(&new_btn_wrap);
 
     // ── Virtualized playlist list ─────────────────────────────────────────────
-    // Backing store holds one lightweight GObject per playlist. A FilterListModel
-    // applies the live search text; a SortListModel applies the sort order. The
-    // ListView only realizes rows in view, so art and membership are resolved
-    // lazily, per visible row, in the factory's bind callback.
+    // Backing store holds one lightweight GObject per owned playlist. A
+    // FilterListModel applies the live search text; a SortListModel applies the
+    // sort order. The ListView only realizes rows in view, so art is loaded lazily
+    // per visible row; membership is read once here from the shared index (no fetch
+    // on bind). A playlist the sync has not reached yet reads as not-in until the
+    // next build_for after it lands.
     let store = gio::ListStore::new::<PlaylistRowModel>();
-    for pl in playlists {
-        store.append(&PlaylistRowModel::new(
-            &pl.id,
-            &pl.title,
-            pl.art.as_ref().and_then(|s| s.best_for_width(48)),
-            pl.snapshot_id.as_deref(),
-        ));
+    {
+        let index = cache.index();
+        for pl in playlists {
+            let in_playlist = index.contains(&pl.id, &song_id);
+            store.append(&PlaylistRowModel::new(
+                &pl.id,
+                &pl.title,
+                pl.art.as_deref(),
+                pl.snapshot_id.as_deref(),
+                in_playlist,
+            ));
+        }
     }
 
     let filter = gtk::CustomFilter::new(|_| true);
@@ -452,45 +587,17 @@ fn build_drawer_ui(
         #[strong]
         worker,
         #[strong]
-        cache,
-        #[strong]
         staged_adds,
         #[strong]
         staged_removes,
-        #[strong]
-        api,
-        #[strong]
-        song_id,
         move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
             let row_model = item.item().unwrap().downcast::<PlaylistRowModel>().unwrap();
             let row = item.child().unwrap().downcast::<PlaylistRow>().unwrap();
 
-            let id = row_model.id();
-            let snapshot = row_model.snapshot_id();
-
-            // Resolve membership from the cache if we have a snapshot-matching
-            // entry; otherwise kick off a lazy fetch for just this playlist.
-            match cache.borrow().contains(&id, snapshot.as_deref(), &song_id) {
-                Some(true) => row_model.set_membership(Membership::In),
-                Some(false) => row_model.set_membership(Membership::NotIn),
-                None => row_model.set_membership(Membership::Unknown),
-            }
-
+            // Membership was resolved from the index when the store was built and
+            // rides on the row model, so binding only wires the widget — no fetch.
             row.bind(&row_model, &worker, &staged_adds, &staged_removes);
-
-            if row_model.membership() == Membership::Unknown {
-                fetch_membership_for_row(
-                    &worker,
-                    &api,
-                    &cache,
-                    &row_model,
-                    &row,
-                    &song_id,
-                    &staged_adds,
-                    &staged_removes,
-                );
-            }
         }
     ));
 
@@ -520,6 +627,17 @@ fn build_drawer_ui(
         .child(&clamp)
         .build();
     root.append(&scroll);
+
+    // Subtle hint while the first-run sync is still filling the index: some rows
+    // may read unchecked until it lands. The drawer rebuilds when it finishes.
+    if cache.is_syncing() {
+        let hint = gtk::Label::builder()
+            .label(gettext("Checking your playlists…"))
+            .css_classes(["caption", "dim-label"])
+            .margin_bottom(12)
+            .build();
+        root.append(&hint);
+    }
 
     // ── Search filter ─────────────────────────────────────────────────────────
     search_entry.connect_search_changed(clone!(
@@ -595,10 +713,9 @@ fn build_drawer_ui(
     cancel_btn.connect_clicked(move |_| set_sheet_open(&sheet_clone, false));
 
     // ── Save: apply the diff ──────────────────────────────────────────────────
-    // Adds come from staged_adds, removes from staged_removes. For a checked
-    // playlist whose membership we never resolved, we fetch its track ids first
-    // and skip the add if the track is already present, so Save can never create
-    // a duplicate.
+    // Adds come from staged_adds, removes from staged_removes. Dedup is index-based:
+    // if the index already knows the playlist contains the song, the add is skipped
+    // so Save never duplicates a track. No per-save fetching.
     let staged_adds_save = staged_adds.clone();
     let staged_removes_save = staged_removes.clone();
     let cache_save = cache.clone();
@@ -610,31 +727,23 @@ fn build_drawer_ui(
     save_btn.connect_clicked(move |_| {
         set_sheet_open(&sheet_save, false);
 
-        let adds: Vec<String> = staged_adds_save.borrow().iter().cloned().collect();
+        // Filter the adds against the index up front (on the main thread, cheap) so
+        // the async task only issues the calls that actually change anything.
+        let adds: Vec<String> = {
+            let index = cache_save.index();
+            staged_adds_save
+                .borrow()
+                .iter()
+                .filter(|pid| !index.contains(pid, &song_id_save))
+                .cloned()
+                .collect()
+        };
         let removes: Vec<String> = staged_removes_save.borrow().iter().cloned().collect();
 
         let api = api_save.clone();
-        let cache = cache_save.clone();
         let song_uri = song_uri_save.clone();
-        let song_id = song_id_save.clone();
         worker_save.send_local_task(async move {
             for pid in adds {
-                // If we already know the track is present, adding again would
-                // duplicate it — skip. If membership is unknown, fetch first.
-                let known = cache.borrow().track_ids(&pid).map(|s| s.contains(&song_id));
-                let already_in = match known {
-                    Some(present) => present,
-                    None => match api.get_playlist_track_ids(&pid).await {
-                        Ok(ids) => ids.iter().any(|i| i == &song_id),
-                        Err(e) => {
-                            error!("add-to-playlist: fetch before add failed for {pid}: {e:?}");
-                            false
-                        }
-                    },
-                };
-                if already_in {
-                    continue;
-                }
                 if let Err(e) = api.add_to_playlist(&pid, vec![song_uri.clone()]).await {
                     error!("add-to-playlist: add to {pid} failed: {e:?}");
                 }
@@ -648,84 +757,6 @@ fn build_drawer_ui(
     });
 
     host.set_child(Some(&root));
-}
-
-// Lazily fetch a single playlist's track ids, cache the result, then update the
-// (possibly-recycled) row. The fetch runs on the same local executor as art
-// loading, so it may touch widgets. The row/model are weak-referenced: if the
-// row was unbound before the fetch returns, only the cache is updated.
-#[allow(clippy::too_many_arguments)]
-fn fetch_membership_for_row(
-    worker: &Worker,
-    api: &Arc<dyn SpotifyApiClient + Send + Sync>,
-    cache: &SharedMembershipCache,
-    row_model: &PlaylistRowModel,
-    row: &PlaylistRow,
-    song_id: &str,
-    staged_adds: &Rc<RefCell<HashSet<String>>>,
-    staged_removes: &Rc<RefCell<HashSet<String>>>,
-) {
-    let id = row_model.id();
-    // A missing snapshot only means we cannot key a *persistent* cache entry; the
-    // membership itself is still worth resolving. Fetch anyway and just skip the
-    // disk write when there is no snapshot, rather than silently declaring the
-    // track NotIn (which would permanently hide a legitimate checkmark).
-    let snapshot = row_model.snapshot_id();
-
-    let api = api.clone();
-    let cache = cache.clone();
-    let song_id = song_id.to_owned();
-    let weak_model = row_model.downgrade();
-    let weak_row = row.downgrade();
-    let staged_adds = staged_adds.clone();
-    let staged_removes = staged_removes.clone();
-
-    error!("ATPDBG2 fetch called for {id} (snapshot={snapshot:?})");
-
-    worker.send_local_task(async move {
-        let ids = match api.get_playlist_track_ids(&id).await {
-            Ok(ids) => ids,
-            Err(e) => {
-                error!("ATPDBG2 fetch for {id} FAILED: {e:?}");
-                return;
-            }
-        };
-        let set: HashSet<String> = ids.into_iter().collect();
-        let contains = set.contains(&song_id);
-        error!(
-            "ATPDBG2 fetch result {id}: {} tracks, song_id={song_id}, contains={contains}",
-            set.len()
-        );
-        if let Some(snapshot) = snapshot {
-            cache.borrow_mut().insert(id.clone(), snapshot, set);
-            cache.schedule_save();
-        }
-
-        // The model is unique per playlist, so recording its membership is always
-        // correct even if the widget it was bound to has since been recycled.
-        if let Some(model) = weak_model.upgrade() {
-            model.set_membership(if contains {
-                Membership::In
-            } else {
-                Membership::NotIn
-            });
-
-            // Only touch the widget if it is STILL showing this playlist. Rows are
-            // recycled across playlists as the user scrolls; refreshing a row that
-            // has moved on would flip the wrong checkbox.
-            if let Some(row) = weak_row.upgrade() {
-                let bound = row.bound_id();
-                let pass = bound == id;
-                error!("ATPDBG2 guard {id}: bound_id={bound} pass={pass}");
-                if pass {
-                    row.refresh_checkbox(&model, &staged_adds, &staged_removes);
-                    error!("ATPDBG2 checkbox refreshed for {id} (contains={contains})");
-                }
-            } else {
-                error!("ATPDBG2 row gone for {id}, cache-only update");
-            }
-        }
-    });
 }
 
 // ── Widget helpers ────────────────────────────────────────────────────────────
@@ -779,7 +810,6 @@ fn song_text_box(title: &str, artist: &str) -> gtk::Box {
 // playlists via bind/unbind. It owns its own art image, name label and checkbox
 // and tracks the currently-bound playlist id plus the checkbox's toggle handler.
 mod playlist_row {
-    use super::Membership;
     use super::PlaylistRowModel;
     use gtk::glib;
     use gtk::prelude::*;
@@ -847,7 +877,7 @@ mod playlist_row {
             self.refresh_checkbox(model, staged_adds, staged_removes);
 
             // Wire the toggle so checking/unchecking updates the staged sets. The
-            // handler resolves membership at click time to decide add vs remove.
+            // handler reads indexed membership at click time to decide add vs remove.
             let check = imp.check.clone();
             let id_for_toggle = id.clone();
             let staged_adds = staged_adds.clone();
@@ -857,7 +887,7 @@ mod playlist_row {
                 let now = btn.is_active();
                 let was_in = model_weak
                     .upgrade()
-                    .map(|m| m.membership() == Membership::In)
+                    .map(|m| m.in_playlist())
                     .unwrap_or(false);
                 if now {
                     staged_removes.borrow_mut().remove(&id_for_toggle);
@@ -874,8 +904,8 @@ mod playlist_row {
             imp.toggle_handler.replace(Some(handler));
         }
 
-        // Recompute the checkbox state from staged sets + resolved membership,
-        // without emitting a toggle. Used on bind and after a lazy fetch resolves.
+        // Recompute the checkbox state from staged sets + indexed membership,
+        // without emitting a toggle. Used on bind.
         pub fn refresh_checkbox(
             &self,
             model: &PlaylistRowModel,
@@ -889,7 +919,7 @@ mod playlist_row {
             } else if staged_removes.borrow().contains(&id) {
                 false
             } else {
-                model.membership() == Membership::In
+                model.in_playlist()
             };
 
             // Block the toggle handler so this programmatic update doesn't restage.
@@ -900,11 +930,6 @@ mod playlist_row {
             } else {
                 imp.check.set_active(checked);
             }
-        }
-
-        // The playlist id this row is currently bound to, or empty once unbound.
-        pub fn bound_id(&self) -> String {
-            self.imp().bound_id.borrow().clone()
         }
 
         pub fn unbind(&self) {
@@ -989,15 +1014,17 @@ impl EventListener for AddToPlaylist {
                 self.staged_adds.borrow_mut().clear();
                 self.staged_removes.borrow_mut().clear();
 
-                // Seed known_playlist_ids with the current set BEFORE build_for
-                // so that on the first build nothing is treated as "new" and
-                // auto-checked. Only playlists created during this session
-                // (whose ids appear on subsequent UserPlaylistsLoaded events)
-                // will be auto-staged.
+                // Seed known_playlist_ids with the currently-known owned set BEFORE
+                // build_for so nothing is treated as "new" (and auto-checked) on the
+                // first build. Only playlists created later this session — appearing
+                // in the sync's refreshed owned list — get auto-staged.
                 {
-                    let playlists = self.model.user_playlists();
-                    let current_ids: HashSet<String> =
-                        playlists.iter().map(|p| p.id.clone()).collect();
+                    let current_ids: HashSet<String> = self
+                        .cache
+                        .owned_playlists()
+                        .iter()
+                        .map(|p| p.id.clone())
+                        .collect();
                     *self.known_playlist_ids.borrow_mut() = current_ids;
                 }
 
@@ -1006,16 +1033,12 @@ impl EventListener for AddToPlaylist {
 
                 set_sheet_open(&self.sheet, true);
             }
-            // Rebuild when playlists change (new playlist created, etc.).
-            // staged_adds/staged_removes survive the rebuild; newly-created
-            // playlists are auto-staged via known_playlist_ids diffing in build_for.
+            // Kick the background sync once the user's playlists are loaded. Also
+            // fires when a playlist is created/renamed/removed; the snapshot skip
+            // makes those re-runs cheap and picks up the new owned list.
             AppEvent::LoginEvent(LoginEvent::UserPlaylistsLoaded)
             | AppEvent::BrowserEvent(BrowserEvent::SavedPlaylistsUpdated) => {
-                if let Some(song) = self.current_song.borrow().clone() {
-                    if self.sheet.property::<bool>("open") {
-                        self.build_for(&song);
-                    }
-                }
+                self.start_sync();
             }
             _ => {}
         }

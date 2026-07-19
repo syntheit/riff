@@ -214,6 +214,14 @@ pub struct PlaylistTrackId {
 #[derive(Deserialize, Debug, Clone)]
 pub struct PlaylistTrackIdInner {
     pub id: Option<String>,
+    // Present when the track was relinked for the market/context. Its id is the
+    // one the playlist was built with, so both ids must be indexed to match.
+    pub linked_from: Option<LinkedFrom>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct LinkedFrom {
+    pub id: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

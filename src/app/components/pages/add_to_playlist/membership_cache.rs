@@ -5,15 +5,14 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-// On-disk membership cache: for each playlist we remember the snapshot_id it was
-// fetched at and the full set of track ids it contained. An entry is valid only
-// while the live snapshot_id still matches; a mismatch means the playlist changed
-// and the entry must be re-fetched.
+// On-disk membership index: for each owned playlist we remember the snapshot_id it
+// was indexed at and the full set of track ids it contained. An entry is stale once
+// the live snapshot_id no longer matches; a background sync re-fetches those.
 //
-// Keyed lookups are cheap and the whole thing persists to a single JSON file in
-// riff's cache dir, so membership answers survive restarts and accumulate as the
-// user opens the drawer over time. The first launch on a fresh machine starts
-// empty and fills in lazily, one visible/searched playlist at a time.
+// The set holds both the track id and its `linked_from` id (when the track was
+// relinked per market), so a membership test matches either. Persisting to a single
+// JSON file in riff's cache dir means later launches only re-fetch the playlists
+// that actually changed.
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MembershipEntry {
@@ -22,11 +21,11 @@ pub struct MembershipEntry {
 }
 
 #[derive(Serialize, Deserialize, Default)]
-pub struct MembershipCache {
+pub struct MembershipIndex {
     entries: HashMap<String, MembershipEntry>,
 }
 
-impl MembershipCache {
+impl MembershipIndex {
     fn path() -> PathBuf {
         let mut path: PathBuf = glib::user_cache_dir();
         path.push("riff");
@@ -35,8 +34,8 @@ impl MembershipCache {
         path
     }
 
-    // Read the cache from disk. A missing or malformed file yields an empty cache
-    // rather than an error — the worst case is a round of lazy re-fetches.
+    // Read the index from disk. A missing or malformed file yields an empty index
+    // rather than an error — the worst case is a full re-sync.
     pub fn load() -> Self {
         let path = Self::path();
         match std::fs::read(&path) {
@@ -52,23 +51,22 @@ impl MembershipCache {
         }
     }
 
-    // Whether the track is in the playlist according to a valid (snapshot-matching)
-    // cache entry. Returns None when we have no valid entry and must fetch.
-    pub fn contains(
-        &self,
-        playlist_id: &str,
-        snapshot_id: Option<&str>,
-        track_id: &str,
-    ) -> Option<bool> {
-        let entry = self.entries.get(playlist_id)?;
-        match snapshot_id {
-            Some(snap) if snap == entry.snapshot_id => Some(entry.track_ids.contains(track_id)),
-            _ => None,
+    // Whether the current entry (if any) was indexed at this snapshot. A miss means
+    // the playlist still needs syncing.
+    pub fn is_fresh(&self, playlist_id: &str, snapshot_id: Option<&str>) -> bool {
+        match (self.entries.get(playlist_id), snapshot_id) {
+            (Some(entry), Some(snap)) => entry.snapshot_id == snap,
+            _ => false,
         }
     }
 
-    pub fn track_ids(&self, playlist_id: &str) -> Option<&HashSet<String>> {
-        self.entries.get(playlist_id).map(|e| &e.track_ids)
+    // Synchronous membership test used by the drawer rows. Returns false when the
+    // playlist has not been indexed yet (cold run); the background sync fills it in.
+    pub fn contains(&self, playlist_id: &str, track_id: &str) -> bool {
+        self.entries
+            .get(playlist_id)
+            .map(|e| e.track_ids.contains(track_id))
+            .unwrap_or(false)
     }
 
     pub fn insert(&mut self, playlist_id: String, snapshot_id: String, track_ids: HashSet<String>) {
@@ -82,29 +80,63 @@ impl MembershipCache {
     }
 }
 
-// A shared, debounced handle around the cache. Reads/writes go through the inner
-// RefCell; saves are coalesced so a burst of lazy fetches (e.g. scrolling the
-// whole list) produces at most one disk write per debounce window.
+// Lightweight description of an owned playlist the drawer can list without a fetch.
+// Populated by the background sync from the authoritative saved-playlists response.
+#[derive(Clone)]
+pub struct OwnedPlaylist {
+    pub id: String,
+    pub title: String,
+    pub art: Option<String>,
+    pub snapshot_id: Option<String>,
+}
+
+// Shared, debounced handle around the index plus the owned-playlist list. Both the
+// background sync and the drawer hold a clone; reads/writes go through the inner
+// RefCells. Saves are coalesced so a burst of sequential syncs produces at most one
+// disk write per debounce window.
 #[derive(Clone)]
 pub struct SharedMembershipCache {
-    inner: Rc<RefCell<MembershipCache>>,
+    index: Rc<RefCell<MembershipIndex>>,
+    owned: Rc<RefCell<Vec<OwnedPlaylist>>>,
+    syncing: Rc<Cell<bool>>,
     save_pending: Rc<Cell<bool>>,
 }
 
 impl SharedMembershipCache {
     pub fn load() -> Self {
         Self {
-            inner: Rc::new(RefCell::new(MembershipCache::load())),
+            index: Rc::new(RefCell::new(MembershipIndex::load())),
+            owned: Rc::new(RefCell::new(Vec::new())),
+            syncing: Rc::new(Cell::new(false)),
             save_pending: Rc::new(Cell::new(false)),
         }
     }
 
-    pub fn borrow(&self) -> std::cell::Ref<'_, MembershipCache> {
-        self.inner.borrow()
+    pub fn index(&self) -> std::cell::Ref<'_, MembershipIndex> {
+        self.index.borrow()
     }
 
-    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, MembershipCache> {
-        self.inner.borrow_mut()
+    pub fn index_mut(&self) -> std::cell::RefMut<'_, MembershipIndex> {
+        self.index.borrow_mut()
+    }
+
+    // The owned playlists the drawer should list, as last resolved by the sync.
+    pub fn owned_playlists(&self) -> Vec<OwnedPlaylist> {
+        self.owned.borrow().clone()
+    }
+
+    pub fn set_owned_playlists(&self, playlists: Vec<OwnedPlaylist>) {
+        *self.owned.borrow_mut() = playlists;
+    }
+
+    // Whether a background sync is currently walking the owned playlists. Drives the
+    // subtle "indexing…" hint while some rows may still read as unchecked.
+    pub fn is_syncing(&self) -> bool {
+        self.syncing.get()
+    }
+
+    pub fn set_syncing(&self, syncing: bool) {
+        self.syncing.set(syncing);
     }
 
     // Schedule a save on the main context, collapsing repeated calls within the
@@ -113,11 +145,11 @@ impl SharedMembershipCache {
         if self.save_pending.replace(true) {
             return;
         }
-        let inner = self.inner.clone();
+        let index = self.index.clone();
         let pending = self.save_pending.clone();
         glib::timeout_add_local_once(Duration::from_secs(2), move || {
             pending.set(false);
-            inner.borrow().save();
+            index.borrow().save();
         });
     }
 }

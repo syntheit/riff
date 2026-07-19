@@ -35,10 +35,11 @@ pub trait SpotifyApiClient {
         limit: usize,
     ) -> BoxFuture<SpotifyResult<SongBatch>>;
 
-    /// Fetch all track ids for a playlist, paging automatically.
-    /// Uses a fields-filtered endpoint so each page is tiny.
-    /// Cost: first open fetches all pages (one req per 50 tracks); subsequent
-    /// opens only re-fetch playlists whose snapshot_id changed.
+    /// Fetch all track ids for a playlist, paging automatically. Both the track
+    /// id and its `linked_from` id (when relinked for the market) are returned so
+    /// membership tests match either. Uses a fields-filtered endpoint so each page
+    /// is tiny. Cost: first sync fetches all pages (one req per 50 tracks);
+    /// subsequent syncs only re-fetch playlists whose snapshot_id changed.
     fn get_playlist_track_ids(&self, id: &str) -> BoxFuture<SpotifyResult<Vec<String>>>;
 
     fn get_saved_albums(
@@ -606,10 +607,16 @@ impl SpotifyApiClient for CachedSpotifyClient {
                     .ok_or(SpotifyApiError::NoContent)?;
 
                 let total = page.total();
-                let fetched: Vec<String> =
-                    page.into_iter().filter_map(|item| item.track?.id).collect();
-
-                ids.extend(fetched);
+                for item in page {
+                    let Some(track) = item.track else { continue };
+                    if let Some(id) = track.id {
+                        ids.push(id);
+                    }
+                    // Index the pre-relink id too so a relinked track still matches.
+                    if let Some(id) = track.linked_from.and_then(|l| l.id) {
+                        ids.push(id);
+                    }
+                }
                 offset += PAGE;
 
                 if offset >= total {

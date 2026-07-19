@@ -420,7 +420,12 @@ impl SpotifyClient {
         limit: usize,
     ) -> SpotifyRequest<'_, (), Page<PlaylistTrackId>> {
         let query = make_query_params()
-            .append_pair("fields", "items(track(id)),total,limit,offset")
+            // linked_from(id) covers relinked tracks: a per-market alias carries a
+            // different id, so both must be indexed for a membership test to match.
+            .append_pair(
+                "fields",
+                "items(track(id,linked_from(id))),total,limit,offset",
+            )
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])
             .finish();
