@@ -40,6 +40,7 @@ pub enum AppAction {
     UpdatePlaylistName(PlaylistSummary),
     RemovePlaylist(String),
     ShowAddToPlaylist(crate::app::models::SongDescription),
+    ShowSongMenu(crate::app::models::SongDescription),
 }
 
 // Not actual actions, just neat wrappers
@@ -109,6 +110,7 @@ pub enum AppEvent {
     PlaylistCreatedNotificationShown(String),
     NowPlayingSheetShown,
     AddToPlaylistShown(crate::app::models::SongDescription),
+    SongMenuShown(crate::app::models::SongDescription),
     SearchTabShown,
     SettingsEvent(SettingsEvent),
 }
@@ -146,6 +148,7 @@ impl AppState {
             AppAction::ShowNotification(c) => vec![AppEvent::NotificationShown(c)],
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
             AppAction::ShowAddToPlaylist(song) => vec![AppEvent::AddToPlaylistShown(song)],
+            AppAction::ShowSongMenu(song) => vec![AppEvent::SongMenuShown(song)],
             AppAction::ShowSearchTab => vec![AppEvent::SearchTabShown],
             AppAction::Raise => vec![AppEvent::Raised],
             // Cross-state actions: multiple "substates" are affected by these actions, that's why they're handled here

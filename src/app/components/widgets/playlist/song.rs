@@ -2,7 +2,6 @@ use crate::app::components::display_add_css_provider;
 use crate::app::loader::ImageLoader;
 use crate::app::models::SongModel;
 use crate::app::Worker;
-use gio::MenuModel;
 use glib::subclass::InitializingObject;
 
 use gtk::prelude::*;
@@ -41,7 +40,8 @@ mod imp {
         pub like_btn: TemplateChild<gtk::Button>,
 
         #[template_child]
-        pub menu_btn: TemplateChild<gtk::MenuButton>,
+        pub menu_btn: TemplateChild<gtk::Button>,
+        pub menu_handler_id: std::cell::RefCell<Option<glib::SignalHandlerId>>,
 
         #[template_child]
         pub song_cover: TemplateChild<gtk::Image>,
@@ -158,11 +158,21 @@ impl SongWidget {
         self.insert_action_group("song", actions);
     }
 
-    pub fn set_menu(&self, menu: Option<&MenuModel>) {
-        if menu.is_some() {
-            let widget = self.imp();
-            widget.menu_btn.set_menu_model(menu);
-            widget.menu_btn.add_css_class("song__menu--enabled");
+    pub fn connect_menu<F: Fn() + 'static>(&self, f: F) {
+        let widget = self.imp();
+        if let Some(old_id) = widget.menu_handler_id.borrow_mut().take() {
+            widget.menu_btn.disconnect(old_id);
+        }
+        let handler_id = widget.menu_btn.connect_clicked(move |_| f());
+        widget.menu_handler_id.replace(Some(handler_id));
+        widget.menu_btn.add_css_class("song__menu--enabled");
+    }
+
+    pub fn disconnect_menu(&self) {
+        let widget = self.imp();
+        if let Some(handler_id) = widget.menu_handler_id.borrow_mut().take() {
+            widget.menu_btn.disconnect(handler_id);
+            widget.menu_btn.remove_css_class("song__menu--enabled");
         }
     }
 

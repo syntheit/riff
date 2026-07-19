@@ -29,9 +29,8 @@ pub trait PlaylistModel {
     fn actions_for(&self, _song: &SongDescription) -> Option<gio::ActionGroup> {
         None
     }
-    fn menu_for(&self, _song: &SongDescription) -> Option<gio::MenuModel> {
-        None
-    }
+
+    fn open_song_menu(&self, _song: &SongDescription) {}
 
     fn select_song(&self, _id: &str) {}
     fn deselect_song(&self, _id: &str) {}
@@ -134,7 +133,15 @@ where
 
                 let song = song_model.description();
                 widget.set_actions(model.actions_for(&song).as_ref());
-                widget.set_menu(model.menu_for(&song).as_ref());
+
+                let menu_song = song.clone();
+                widget.connect_menu(clone!(
+                    #[weak]
+                    model,
+                    move || {
+                        model.open_song_menu(&menu_song);
+                    }
+                ));
 
                 let like_id = song.id.clone();
                 widget.connect_like(clone!(
@@ -153,6 +160,7 @@ where
             song_model.unbind_all();
             let widget = item.child().unwrap().downcast::<SongWidget>().unwrap();
             widget.disconnect_like();
+            widget.disconnect_menu();
         });
 
         listview.connect_activate(clone!(

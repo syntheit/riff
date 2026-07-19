@@ -3,8 +3,6 @@
 // list), follow/unfollow, and playback. On 400/404 from the API, navigates
 // back (the artist may not exist or be inaccessible).
 
-use gio::prelude::*;
-use gio::SimpleActionGroup;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -12,8 +10,7 @@ use crate::api::SpotifyApiError;
 use crate::app::components::DetailsPageModel;
 use crate::app::components::SimpleHeaderBarModel;
 use crate::app::components::{
-    labels, CardListModel, HasHeaderBarModel, HeaderImageShape, ImageShape, PageModel,
-    PlaylistModel,
+    CardListModel, HasHeaderBarModel, HeaderImageShape, ImageShape, PageModel, PlaylistModel,
 };
 use crate::app::models::*;
 use crate::app::state::SelectionContext;
@@ -224,29 +221,13 @@ impl PlaylistModel for ArtistDetailsModel {
             .dispatch(PlaybackAction::Load(id.to_string()).into());
     }
 
-    fn actions_for(&self, song: &SongDescription) -> Option<gio::ActionGroup> {
-        let group = SimpleActionGroup::new();
-        for a in song.make_artist_actions(self.dispatcher.box_clone(), None) {
-            group.add_action(&a);
-        }
-        group.add_action(&song.make_album_action(self.dispatcher.box_clone(), None));
-        group.add_action(&song.make_link_action(None));
-        group.add_action(&song.make_queue_action(self.dispatcher.box_clone(), None));
-        Some(group.upcast())
+    fn actions_for(&self, _song: &SongDescription) -> Option<gio::ActionGroup> {
+        None
     }
 
-    fn menu_for(&self, song: &SongDescription) -> Option<gio::MenuModel> {
-        let menu = gio::Menu::new();
-        menu.append(Some(&*labels::VIEW_ALBUM), Some("song.view_album"));
-        for artist in song.artists.iter().filter(|a| self.id != a.id) {
-            menu.append(
-                Some(&labels::more_from_label(&artist.name)),
-                Some(&format!("song.view_artist_{}", artist.id)),
-            );
-        }
-        menu.append(Some(&*labels::COPY_LINK), Some("song.copy_link"));
-        menu.append(Some(&*labels::ADD_TO_QUEUE), Some("song.queue"));
-        Some(menu.upcast())
+    fn open_song_menu(&self, song: &SongDescription) {
+        self.dispatcher
+            .dispatch(AppAction::ShowSongMenu(song.clone()));
     }
 }
 

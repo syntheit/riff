@@ -36,3 +36,6 @@ pub use search::*;
 
 mod settings;
 pub use settings::*;
+
+mod song_menu;
+pub use song_menu::*;

@@ -10,6 +10,9 @@ Adw.ApplicationWindow window {
   Adw.BottomSheet add_to_playlist_sheet {
     modal: true;
 
+    content: Adw.BottomSheet song_menu_sheet {
+    modal: true;
+
     content: Adw.BottomSheet queue_sheet {
     modal: true;
 
@@ -124,6 +127,13 @@ Adw.ApplicationWindow window {
       Adw.Bin queue_host {
         vexpand: true;
       }
+    }
+    };
+
+    // Song context-menu drawer. Content-sized (short list of actions);
+    // no fixed height-request — let the rows dictate the height.
+    [sheet]
+    Adw.Bin song_menu_host {
     }
     };
 

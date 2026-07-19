@@ -3,8 +3,6 @@
 // track listing, pagination, playback, and selection.
 
 use gettextrs::gettext;
-use gio::prelude::*;
-use gio::SimpleActionGroup;
 use std::ops::Deref;
 use std::rc::Rc;
 
@@ -12,13 +10,13 @@ use crate::{impl_playlist_model_base, impl_toggle_play};
 
 use crate::app::components::DetailsPageModel;
 use crate::app::components::{
-    labels, HasHeaderBarModel, HeaderImageShape, PageModel, PlaylistModel, SimpleHeaderBarModel,
+    HasHeaderBarModel, HeaderImageShape, PageModel, PlaylistModel, SimpleHeaderBarModel,
 };
 use crate::app::models::*;
 use crate::app::state::SelectionContext;
 use crate::app::state::{PlaybackAction, SelectionAction, SelectionState};
 use crate::app::{
-    ActionDispatcher, AppEvent, AppModel, BatchQuery, BrowserAction, BrowserEvent,
+    ActionDispatcher, AppAction, AppEvent, AppModel, BatchQuery, BrowserAction, BrowserEvent,
     PaginationTarget, SongsSource,
 };
 use crate::feature_flags::{self, FeatureFlag};
@@ -168,27 +166,13 @@ impl PlaylistModel for SavedTracksModel {
         }
     }
 
-    fn actions_for(&self, song: &SongDescription) -> Option<gio::ActionGroup> {
-        let group = SimpleActionGroup::new();
-        for a in song.make_artist_actions(self.dispatcher.box_clone(), None) {
-            group.add_action(&a);
-        }
-        group.add_action(&song.make_album_action(self.dispatcher.box_clone(), None));
-        group.add_action(&song.make_link_action(None));
-        Some(group.upcast())
+    fn actions_for(&self, _song: &SongDescription) -> Option<gio::ActionGroup> {
+        None
     }
 
-    fn menu_for(&self, song: &SongDescription) -> Option<gio::MenuModel> {
-        let menu = gio::Menu::new();
-        menu.append(Some(&*labels::VIEW_ALBUM), Some("song.view_album"));
-        for artist in song.artists.iter() {
-            menu.append(
-                Some(&labels::more_from_label(&artist.name)),
-                Some(&format!("song.view_artist_{}", artist.id)),
-            );
-        }
-        menu.append(Some(&*labels::COPY_LINK), Some("song.copy_link"));
-        Some(menu.upcast())
+    fn open_song_menu(&self, song: &SongDescription) {
+        self.dispatcher
+            .dispatch(AppAction::ShowSongMenu(song.clone()));
     }
 }
 

@@ -128,6 +128,12 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
+            App::make_song_menu(
+                builder,
+                Rc::clone(model),
+                dispatcher.box_clone(),
+                worker.clone(),
+            ),
             App::make_login(builder, dispatcher.box_clone()),
             App::make_navigation(
                 builder,
@@ -275,6 +281,29 @@ impl App {
         let sheet: gtk::Widget = builder.object("add_to_playlist_sheet").unwrap();
         let model = AddToPlaylistModel::new(app_model, dispatcher);
         Box::new(AddToPlaylist::new(model, host, sheet, worker))
+    }
+
+    fn make_song_menu(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
+    ) -> Box<impl EventListener> {
+        let host: libadwaita::Bin = builder.object("song_menu_host").unwrap();
+        let sheet: gtk::Widget = builder.object("song_menu_sheet").unwrap();
+        let add_to_playlist_sheet: gtk::Widget = builder.object("add_to_playlist_sheet").unwrap();
+        let queue_sheet: gtk::Widget = builder.object("queue_sheet").unwrap();
+        let now_playing_sheet: gtk::Widget = builder.object("now_playing_sheet").unwrap();
+        let model = SongMenuModel::new(app_model, dispatcher);
+        Box::new(SongMenu::new(
+            model,
+            host,
+            sheet,
+            add_to_playlist_sheet,
+            queue_sheet,
+            now_playing_sheet,
+            worker,
+        ))
     }
 
     fn make_user_menu(
