@@ -15,12 +15,21 @@ template $EqualizerWidget : Adw.PreferencesGroup {
     ]
   };
 
+  // Wrap the slider row in a horizontal ScrolledWindow so it shrinks to fit
+  // the phone's ~520 px logical width instead of forcing the page wider than
+  // the screen.  The 10 homogeneous scale columns have a natural minimum width
+  // well above 540 px; letting them scroll horizontally avoids overflow.
+  ScrolledWindow {
+    hscrollbar-policy: automatic;
+    vscrollbar-policy: never;
+    hexpand: true;
+    margin-top: 12;
+    margin-bottom: 12;
+
   Gtk.Box eq_bands_box {
     orientation: horizontal;
     homogeneous: true;
     spacing: 2;
-    margin-top: 12;
-    margin-bottom: 12;
     height-request: 220;
 
     styles [
@@ -326,5 +335,6 @@ template $EqualizerWidget : Adw.PreferencesGroup {
         styles [ "caption", "dim-label" ]
       }
     }
+  }
   }
 }

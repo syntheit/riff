@@ -6,12 +6,15 @@ use std::rc::Rc;
 
 use super::UserMenuModel;
 use crate::app::components::EventListener;
-use crate::app::state::{BrowserAction, LoginEvent, ScreenName};
+use crate::app::state::{BrowserAction, BrowserEvent, LoginEvent, ScreenName};
 use crate::app::{ActionDispatcher, AppEvent};
 
 pub struct UserMenu {
     user_button: gtk::MenuButton,
     model: Rc<UserMenuModel>,
+    /// Number of detail pages currently pushed on top of the tab shell.
+    /// The ⋯ button is hidden while this is > 0.
+    nav_depth: usize,
 }
 
 impl UserMenu {
@@ -62,7 +65,11 @@ impl UserMenu {
 
         user_button.insert_action_group("menu", Some(&action_group));
 
-        Self { user_button, model }
+        Self {
+            user_button,
+            model,
+            nav_depth: 0,
+        }
     }
 
     fn update_menu(&self) {
@@ -91,6 +98,22 @@ impl EventListener for UserMenu {
             AppEvent::LoginEvent(LoginEvent::LoginCompleted) | AppEvent::Started => {
                 self.update_menu();
                 self.model.fetch_user_playlists();
+            }
+            // Hide the ⋯ button while any detail page is on top of the tab shell
+            // so it doesn't float over the detail page's own back button.
+            AppEvent::BrowserEvent(BrowserEvent::NavigationPushed(_)) => {
+                self.nav_depth += 1;
+                self.user_button.set_visible(false);
+            }
+            AppEvent::BrowserEvent(BrowserEvent::NavigationPopped) => {
+                self.nav_depth = self.nav_depth.saturating_sub(1);
+                if self.nav_depth == 0 {
+                    self.user_button.set_visible(true);
+                }
+            }
+            AppEvent::BrowserEvent(BrowserEvent::NavigationPoppedTo(_)) => {
+                self.nav_depth = 0;
+                self.user_button.set_visible(true);
             }
             _ => {}
         }

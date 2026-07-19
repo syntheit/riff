@@ -1,3 +1,6 @@
+use std::cell::Cell;
+use std::rc::Rc;
+
 use gettextrs::gettext;
 use gtk::prelude::WidgetExt;
 
@@ -10,9 +13,10 @@ use super::factory::ScreenFactory;
 // The shell is a single AdwNavigationView (`root_nav`) whose root page is the tab
 // shell: an AdwViewStack (`tab_stack`) with Home / Search / Library, switched by a
 // bottom AdwViewSwitcherBar. Album/artist/playlist/user detail pages — and the
-// queue — push on top of the whole tab shell. Pushed pages are `can-pop: false`
-// so navigation stays purely state-driven (back button / Alt+Left → NavigationPop),
-// exactly like the previous gtk::Stack model.
+// queue — push on top of the whole tab shell. Pushed pages have `can-pop: true` so
+// the native swipe-back gesture works; the `popped` signal keeps the state machine
+// in sync. A `programmatic_pop` flag prevents double-dispatching when we pop
+// programmatically in response to a `NavigationPopped` event.
 pub struct Navigation {
     root_nav: libadwaita::NavigationView,
     tab_stack: libadwaita::ViewStack,
@@ -20,6 +24,11 @@ pub struct Navigation {
     dispatcher: Box<dyn ActionDispatcher>,
     tab_roots: Vec<Box<dyn ListenerComponent>>,
     children: Vec<Box<dyn ListenerComponent>>,
+    /// Incremented before each programmatic pop and decremented inside
+    /// `connect_popped` so the callback knows to skip re-dispatching `NavigationPop`.
+    /// Using a count (not a bool) correctly handles `pop_to_root` which fires
+    /// `popped` once per removed page.
+    programmatic_pop_count: Rc<Cell<u32>>,
 }
 
 impl Navigation {
@@ -29,6 +38,28 @@ impl Navigation {
         screen_factory: ScreenFactory,
         dispatcher: Box<dyn ActionDispatcher>,
     ) -> Self {
+        let programmatic_pop_count = Rc::new(Cell::new(0u32));
+
+        // Wire swipe-back: when the NavigationView pops a page by gesture (or its
+        // own back button), dispatch NavigationPop to keep the state machine in sync.
+        // Guard with `programmatic_pop_count` so we don't dispatch when we initiated
+        // the pop ourselves (which would cause a double-pop). A count (not a bool)
+        // handles `pop_to_root` which fires `popped` once per removed page.
+        {
+            let count = Rc::clone(&programmatic_pop_count);
+            let dispatcher = dispatcher.box_clone();
+            root_nav.connect_popped(move |_nav, _page| {
+                let c = count.get();
+                if c > 0 {
+                    // We triggered this pop ourselves — state machine already knows.
+                    count.set(c - 1);
+                    return;
+                }
+                // User gesture / native back button — tell the state machine.
+                dispatcher.dispatch(BrowserAction::NavigationPop.into());
+            });
+        }
+
         Self {
             root_nav,
             tab_stack,
@@ -36,6 +67,7 @@ impl Navigation {
             dispatcher,
             tab_roots: vec![],
             children: vec![],
+            programmatic_pop_count,
         }
     }
 
@@ -102,18 +134,29 @@ impl Navigation {
             .child(&widget)
             .title(tag)
             .tag(tag)
-            .can_pop(false)
+            .can_pop(true)
             .build();
         self.root_nav.push(&page);
         self.children.push(component);
     }
 
     fn pop(&mut self) {
+        // Increment the count so the `connect_popped` callback knows this pop
+        // was programmatic and must not re-dispatch NavigationPop.
+        self.programmatic_pop_count
+            .set(self.programmatic_pop_count.get() + 1);
         self.root_nav.pop();
         self.children.pop();
     }
 
     fn pop_to_root(&mut self) {
+        // pop_to_tag fires `popped` once per removed page; bump the count by
+        // the number of pages we're removing so every callback is suppressed.
+        let pages_to_remove = self.children.len() as u32;
+        if pages_to_remove > 0 {
+            self.programmatic_pop_count
+                .set(self.programmatic_pop_count.get() + pages_to_remove);
+        }
         self.root_nav.pop_to_tag("tabs");
         self.children.clear();
     }
