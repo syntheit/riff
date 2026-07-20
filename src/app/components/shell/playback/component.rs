@@ -148,11 +148,14 @@ impl PlaybackControl {
             move |value| model.set_volume(value)
         ));
 
-        Self {
+        let control = Self {
             model,
             widget,
             worker,
-        }
+        };
+        // Start hidden until a track loads.
+        control.update_current_info();
+        control
     }
 
     fn update_repeat(&self, mode: &RepeatMode) {
@@ -170,6 +173,7 @@ impl PlaybackControl {
 
     fn update_current_info(&self) {
         if let Some(song) = self.model.current_song() {
+            self.widget.set_mini_player_visible(true);
             self.widget
                 .set_title_and_artist(&song.title, &song.artists_name());
             self.widget.set_song_duration(Some(song.duration_ms as f64));
@@ -178,6 +182,7 @@ impl PlaybackControl {
                     .set_artwork_from_url(url.to_owned(), &self.worker);
             }
         } else {
+            self.widget.set_mini_player_visible(false);
             self.widget.reset_info();
         }
     }

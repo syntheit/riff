@@ -71,13 +71,14 @@
 }
 
 .add-to-playlist-btn {
-  min-width: 40px;
-  min-height: 40px;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0;
 }
 
 .add-to-playlist-unliked {
   background: none;
-  border: 2px solid alpha(currentColor, 0.4);
+  border: 1.5px solid alpha(currentColor, 0.4);
   color: alpha(currentColor, 0.6);
 }
 
@@ -85,4 +86,32 @@
   background-color: #1db954;
   color: white;
   border: none;
+}
+
+/* Thin white progress line pinned to the bottom of the mini-player. */
+.mini-progress {
+  min-height: 2px;
+  padding: 0;
+  margin: 0;
+}
+
+.mini-progress trough {
+  min-height: 2px;
+  border-radius: 0;
+  background-color: alpha(white, 0.2);
+}
+
+.mini-progress progress {
+  min-height: 2px;
+  border-radius: 0;
+  background-color: white;
+}
+
+/* ViewSwitcherBar: remove the persistent pressed/active highlight
+   on the selected tab so it doesn't look stuck in hover state. */
+viewswitcherbar button:active,
+viewswitcherbar button.active,
+viewswitcherbar button:checked {
+  background-color: transparent;
+  box-shadow: none;
 }

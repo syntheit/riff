@@ -48,6 +48,9 @@ mod imp {
         pub mobile_play_pause: TemplateChild<gtk::Button>,
 
         #[template_child]
+        pub mini_progress: TemplateChild<gtk::ProgressBar>,
+
+        #[template_child]
         pub seek_bar: TemplateChild<gtk::Scale>,
 
         #[template_child]
@@ -174,6 +177,13 @@ glib::wrapper! {
 }
 
 impl PlaybackWidget {
+    /// Show or hide the entire mini-player strip.
+    /// When hidden the widget collapses to zero height so the tab bar
+    /// sits flush at the bottom with no gap.
+    pub fn set_mini_player_visible(&self, visible: bool) {
+        self.set_visible(visible);
+    }
+
     pub fn set_title_and_artist(&self, title: &str, artist: &str) {
         let widget = self.imp();
         widget.now_playing.set_visible(true);
@@ -219,9 +229,11 @@ impl PlaybackWidget {
             widget.seek_bar.set_range(0.0, duration);
             widget.seek_bar.set_value(0.0);
             self.update_track_time(0.0, duration);
+            widget.mini_progress.set_fraction(0.0);
         } else {
             self.remove_css_class(class);
             widget.seek_bar.set_range(0.0, 0.0);
+            widget.mini_progress.set_fraction(0.0);
         }
     }
 
@@ -230,6 +242,11 @@ impl PlaybackWidget {
         widget.seek_bar.set_value(pos);
         let duration = widget.seek_bar.adjustment().upper();
         self.update_track_time(pos, duration);
+        if duration > 0.0 {
+            widget
+                .mini_progress
+                .set_fraction((pos / duration).clamp(0.0, 1.0));
+        }
     }
 
     fn update_track_time(&self, pos: f64, duration: f64) {

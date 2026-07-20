@@ -59,6 +59,7 @@ template $PlaybackWidget : Box {
 
       setters {
         layout-stack.visible-child-name: "mobile";
+        seek_overlay.visible: false;
       }
     }
 
@@ -150,78 +151,88 @@ template $PlaybackWidget : Box {
       StackPage {
         name: "mobile";
         child: Box mobile_bar {
-          spacing: 10;
-          margin-start: 12;
-          margin-end: 6;
-          margin-top: 4;
-          margin-bottom: 4;
+          orientation: vertical;
 
           styles [
             "mini-player",
           ]
 
-          Image mobile_art {
-            pixel-size: 44;
-            valign: center;
-
-            styles [
-              "mini-player-art",
-            ]
-          }
-
           Box {
-            orientation: vertical;
-            valign: center;
-            hexpand: true;
+            spacing: 10;
+            margin-start: 12;
+            margin-end: 6;
+            margin-top: 4;
+            margin-bottom: 4;
 
-            Label mobile_title {
-              ellipsize: end;
-              xalign: 0;
-              single-line-mode: true;
+            Image mobile_art {
+              pixel-size: 44;
+              valign: center;
 
               styles [
-                "heading",
+                "mini-player-art",
               ]
             }
 
-            Label mobile_artist {
-              ellipsize: end;
-              xalign: 0;
-              single-line-mode: true;
+            Box {
+              orientation: vertical;
+              valign: center;
+              hexpand: true;
+
+              Label mobile_title {
+                ellipsize: end;
+                xalign: 0;
+                single-line-mode: true;
+
+                styles [
+                  "heading",
+                ]
+              }
+
+              Label mobile_artist {
+                ellipsize: end;
+                xalign: 0;
+                single-line-mode: true;
+
+                styles [
+                  "caption",
+                  "dim-label",
+                ]
+              }
+            }
+
+            Button mobile_add {
+              valign: center;
+              focus-on-click: false;
+              can-focus: false;
+              tooltip-text: _("Add to playlist");
 
               styles [
-                "caption",
-                "dim-label",
+                "circular",
+                "add-to-playlist-btn",
+              ]
+
+              Image mobile_add_icon {
+                icon-name: "list-add-symbolic";
+                pixel-size: 14;
+              }
+            }
+
+            Button mobile_play_pause {
+              icon-name: "media-playback-start-symbolic";
+              valign: center;
+              focus-on-click: false;
+              can-focus: false;
+
+              styles [
+                "flat",
+                "circular",
               ]
             }
           }
 
-          Button mobile_add {
-            valign: center;
-            focus-on-click: false;
-            can-focus: false;
-            tooltip-text: _("Add to playlist");
-
+          ProgressBar mini_progress {
             styles [
-              "circular",
-              "add-to-playlist-btn",
-            ]
-
-            Image mobile_add_icon {
-              icon-name: "list-add-symbolic";
-              pixel-size: 20;
-            }
-          }
-
-          Button mobile_play_pause {
-            icon-name: "media-playback-start-symbolic";
-            valign: center;
-            focus-on-click: false;
-            can-focus: false;
-
-            styles [
-              "flat",
-              "circular",
+              "mini-progress",
             ]
           }
         };
