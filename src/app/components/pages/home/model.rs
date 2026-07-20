@@ -10,7 +10,8 @@ const RECENTLY_PLAYED_LIMIT: usize = 20;
 const TOP_ARTISTS_LIMIT: usize = 20;
 const TOP_TRACKS_LIMIT: usize = 20;
 /// How many albums to pull for the "Because you listen to <artist>" shelf.
-const MADE_FOR_YOU_LIMIT: usize = 12;
+/// Dev-mode client ids have a hard cap of 10 on /v1/artists/{id}/albums.
+const MADE_FOR_YOU_LIMIT: usize = 10;
 
 /// Sentinel id for the pinned "Liked Songs" shortcut tile. Opening it pushes the
 /// saved-tracks page rather than resolving against a Spotify item id.

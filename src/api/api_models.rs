@@ -64,11 +64,9 @@ impl SearchQuery {
             .append_pair("q", query.as_ref())
             .append_pair("offset", &self.offset.to_string()[..])
             .append_pair("limit", &self.limit.to_string()[..])
-            // Dev-mode client ids reject `market=from_token` and return a
-            // misleading `400 "Invalid limit"` (same failure mode already seen for
-            // get_artist_albums). Use a concrete market, matching the other fixed
-            // calls (get_artist_albums, get_saved_albums region).
-            .append_pair("market", "US")
+            // Omit `market`: a user-token request defaults to the account's own
+            // market automatically, so hardcoding any region (e.g. US) would
+            // mislocate results for non-US accounts (e.g. BR).
             .finish();
 
         format!("type={types}&{serialized}")
@@ -877,7 +875,7 @@ mod tests {
             offset: 0,
         };
 
-        assert_eq!(query.into_query_string(), "type=album,track,artist,playlist&q=%D0%BA%D0%B8%D1%80%D0%B8%D0%BB%D0%BB%D0%B8%D1%86%D0%B0&offset=0&limit=5&market=US");
+        assert_eq!(query.into_query_string(), "type=album,track,artist,playlist&q=%D0%BA%D0%B8%D1%80%D0%B8%D0%BB%D0%BB%D0%B8%D1%86%D0%B0&offset=0&limit=5");
     }
 
     #[test]
@@ -890,7 +888,7 @@ mod tests {
 
         assert_eq!(
             query.into_query_string(),
-            "type=album,track,artist,playlist&q=test+wow&offset=0&limit=5&market=US"
+            "type=album,track,artist,playlist&q=test+wow&offset=0&limit=5"
         );
     }
 }

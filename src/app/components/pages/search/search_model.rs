@@ -47,9 +47,9 @@ impl SearchResultsModel {
             let query = query.to_owned();
             self.dispatcher
                 .call_spotify_and_dispatch(move || async move {
-                    // Fetch a fuller page per type: the redesigned search shows one
-                    // dense, unified list, so we want enough of each kind to fill it.
-                    api.search(&query, 0, 20)
+                    // Dev-mode client ids have a hard limit of 10 on /v1/search;
+                    // limit>=12 returns 400 "Invalid limit". Cap at 10.
+                    api.search(&query, 0, 10)
                         .await
                         .map(|results| BrowserAction::SetSearchResults(Box::new(results)).into())
                 });

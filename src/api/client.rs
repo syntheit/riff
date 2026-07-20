@@ -330,12 +330,13 @@ impl SpotifyClient {
         offset: usize,
         limit: usize,
     ) -> SpotifyRequest<'_, (), Page<Album>> {
-        let limit = limit.clamp(1, 50);
+        // Dev-mode client ids hard-cap /v1/artists/{id}/albums at limit=10;
+        // limit>=12 returns 400 "Invalid limit".
+        let limit = limit.clamp(1, 10);
         // `form_urlencoded` percent-encodes commas as %2C, but the Spotify
         // `/artists/{id}/albums` endpoint requires literal commas in
-        // `include_groups` — sending %2C triggers a misleading "Invalid limit"
-        // 400.  Build the rest of the params normally and prepend the
-        // comma-bearing value as a raw segment so the comma is never encoded.
+        // `include_groups`.  Build the rest of the params normally and prepend
+        // the comma-bearing value as a raw segment so the comma is never encoded.
         let rest = make_query_params()
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])

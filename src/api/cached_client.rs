@@ -501,7 +501,9 @@ impl SpotifyApiClient for CachedSpotifyClient {
             let (album, liked) = join!(album, liked);
 
             let mut album: AlbumFullDescription = album?.into();
-            album.description.is_liked = liked?[0];
+            // `/me/albums/contains` returns 403 for dev-mode client ids; treat
+            // a failed check as "not saved" so the album detail page still loads.
+            album.description.is_liked = liked.ok().and_then(|v| v.first().copied()).unwrap_or(false);
 
             Ok(album)
         })
@@ -717,12 +719,18 @@ impl SpotifyApiClient for CachedSpotifyClient {
             let artist = artist?;
             let photo =
                 ImageSet::from_images(artist.images().iter().map(|i| (i.width, i.url.clone())));
+            // `/v1/artists/{id}/top-tracks` returns 403 for dev-mode client ids
+            // (hard API deprecation). Treat a failure as an empty track list so
+            // the rest of the artist detail page still loads.
+            let top_tracks_vec: Vec<SongDescription> = top_tracks
+                .map(|tt| tt.into())
+                .unwrap_or_default();
             let result = ArtistDescription {
                 id: artist.id,
                 name: artist.name,
                 photo,
                 albums: albums?,
-                top_tracks: top_tracks?.into(),
+                top_tracks: top_tracks_vec,
                 is_followed,
             };
             Ok(result)
