@@ -306,14 +306,16 @@ impl SpotifyClient {
         limit: usize,
     ) -> SpotifyRequest<'_, (), Page<Album>> {
         let limit = limit.clamp(1, 50);
-        let query = make_query_params()
-            .append_pair("include_groups", "album,single")
-            .append_pair("market", "US")
+        // `form_urlencoded` percent-encodes commas as %2C, but the Spotify
+        // `/artists/{id}/albums` endpoint requires literal commas in
+        // `include_groups` — sending %2C triggers a misleading "Invalid limit"
+        // 400.  Build the rest of the params normally and prepend the
+        // comma-bearing value as a raw segment so the comma is never encoded.
+        let rest = make_query_params()
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])
             .finish();
-
-        eprintln!("RIFF_HOME: get_artist_albums query = {}", query);
+        let query = format!("include_groups=album,single&{rest}");
         self.request()
             .method(Method::GET)
             .uri(format!("/v1/artists/{id}/albums"), Some(&query))

@@ -258,21 +258,25 @@ pub struct Album {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AlbumInfo {
-    // `label` and `copyrights` can be absent in some API responses (dev-mode
-    // apps, re-issued albums); default them so a missing field doesn't fail
-    // deserialization and silently blank the album detail page.
+    // `label`, `copyrights`, and `total_tracks` can be absent in some API
+    // responses (dev-mode apps, re-issued albums, restricted scopes); default
+    // them so a missing field doesn't fail deserialization.
     #[serde(default)]
     pub label: String,
     #[serde(default)]
     pub copyrights: Vec<Copyright>,
+    #[serde(default)]
     pub total_tracks: u32,
 }
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Copyright {
+    #[serde(default)]
     pub text: String,
-    #[serde(alias = "type")]
-    pub type_: char,
+    // The Spotify API returns "P" or "C" here; use String (not char) so that
+    // multi-character values or null don't cause a deserialization failure.
+    #[serde(alias = "type", default)]
+    pub type_: String,
 }
 
 impl WithImages for Album {
