@@ -152,10 +152,14 @@ Adw.ApplicationWindow window {
     // The add-to-playlist drawer. Hosted in a Bin so the component can swap
     // content when a different song is targeted. The wrapping Box sets a fixed
     // height (~75-80% of a typical phone screen) so the inner ScrolledWindow
-    // has room to expand — mirrors the queue sheet pattern above.
+    // has room to expand — mirrors the queue sheet pattern above. vexpand lets it
+    // grow to whatever height the sheet is given (AdwBottomSheet caps it to the
+    // window) so the inner ScrolledWindow always has bounded room and can scroll
+    // the whole owned list to the bottom instead of running off-screen.
     [sheet]
     Box {
       orientation: vertical;
+      vexpand: true;
       height-request: 700;
 
       Adw.Bin add_to_playlist_host {

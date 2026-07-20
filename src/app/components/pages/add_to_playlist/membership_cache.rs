@@ -60,6 +60,13 @@ impl MembershipIndex {
         }
     }
 
+    // Whether this playlist has an index entry at all (as opposed to a miss because
+    // the background sync has not reached it yet). Used only by ATPDBG3 diagnostics
+    // to distinguish "indexed but song absent" from "not yet indexed".
+    pub fn is_indexed(&self, playlist_id: &str) -> bool {
+        self.entries.contains_key(playlist_id)
+    }
+
     // Synchronous membership test used by the drawer rows. Returns false when the
     // playlist has not been indexed yet (cold run); the background sync fills it in.
     pub fn contains(&self, playlist_id: &str, track_id: &str) -> bool {

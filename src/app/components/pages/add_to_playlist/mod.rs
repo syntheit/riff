@@ -301,10 +301,16 @@ fn sync_owned_playlists(
     rebuild();
 
     worker.send_local_task(async move {
+        error!("ATPDBG3 sync start user={user_id}");
+
         // Resolve the owned playlists from the authoritative saved-playlists list,
         // which carries owner ids (the home cards drop them).
         const PAGE: usize = 50;
         let mut owned: Vec<OwnedPlaylist> = Vec::new();
+        // Dedup by playlist id: Spotify's offset-paged /me/playlists can return the
+        // same playlist on more than one page (overlap when the library shifts under
+        // paging), which surfaced as every playlist appearing twice in the drawer.
+        let mut seen_ids: HashSet<String> = HashSet::new();
         let mut offset = 0usize;
         loop {
             let batch = match api.get_saved_playlists(offset, PAGE).await {
@@ -316,7 +322,7 @@ fn sync_owned_playlists(
             };
             let fetched = batch.len();
             for pl in batch {
-                if pl.owner.id == user_id {
+                if pl.owner.id == user_id && seen_ids.insert(pl.id.clone()) {
                     owned.push(OwnedPlaylist {
                         id: pl.id,
                         title: pl.title,
@@ -334,6 +340,8 @@ fn sync_owned_playlists(
                 break;
             }
         }
+
+        error!("ATPDBG3 owned count={}", owned.len());
 
         cache.set_owned_playlists(owned.clone());
         rebuild();
@@ -355,6 +363,12 @@ fn sync_owned_playlists(
                 }
             };
             let set: HashSet<String> = ids.into_iter().collect();
+            error!(
+                "ATPDBG3 indexed {} ({}): {} tracks",
+                pl.id,
+                pl.title,
+                set.len()
+            );
 
             // Only a persistent (snapshot-keyed) entry can be skipped next launch; a
             // playlist with no snapshot is still indexed for this session's checks.
@@ -371,6 +385,7 @@ fn sync_owned_playlists(
             }
         }
 
+        error!("ATPDBG3 sync complete ({} owned)", owned.len());
         cache.set_syncing(false);
         cache.schedule_save();
         rebuild();
@@ -397,8 +412,12 @@ fn build_drawer_ui(
     let api = model.app_model.get_spotify();
 
     // ── Root layout ──────────────────────────────────────────────────────────
+    // vexpand so the Box fills the whole height the sheet gives it; without this the
+    // Box only claims its natural height, the trailing ScrolledWindow never gets a
+    // bounded allocation, and the list runs off the bottom of the sheet unscrollably.
     let root = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
+        .vexpand(true)
         .build();
 
     // Header bar
@@ -547,6 +566,14 @@ fn build_drawer_ui(
         let index = cache.index();
         for pl in playlists {
             let in_playlist = index.contains(&pl.id, &song_id);
+            error!(
+                "ATPDBG3 row {} id={} contains={} indexed={} song_id={}",
+                pl.title,
+                pl.id,
+                in_playlist,
+                index.is_indexed(&pl.id),
+                song_id,
+            );
             store.append(&PlaylistRowModel::new(
                 &pl.id,
                 &pl.title,
@@ -621,9 +648,16 @@ fn build_drawer_ui(
         .margin_bottom(24)
         .child(&list_view)
         .build();
+    // propagate_natural_height stays false (the default) on purpose: if it were true
+    // the ScrolledWindow would demand the ListView's full un-scrolled height, growing
+    // the sheet past the screen so the bottom rows can't be reached. Instead it takes
+    // the leftover vexpand space and scrolls its content within it. min_content_height
+    // guarantees a usable scroll viewport even on a short sheet.
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
+        .propagate_natural_height(false)
+        .min_content_height(200)
         .child(&clamp)
         .build();
     root.append(&scroll);
@@ -640,8 +674,13 @@ fn build_drawer_ui(
     }
 
     // ── Search filter ─────────────────────────────────────────────────────────
+    // Capture the filter STRONGLY, not weakly. A bare #[weak] silently no-ops the
+    // closure whenever the upgrade fails, which is exactly the "typing does nothing"
+    // symptom; the filter is owned only by the FilterListModel in the widget tree, so
+    // a strong hold from the search handler is safe (both die with the drawer) and
+    // guarantees every keystroke actually re-filters.
     search_entry.connect_search_changed(clone!(
-        #[weak]
+        #[strong]
         filter,
         move |entry| {
             let needle = entry.text().to_lowercase();
