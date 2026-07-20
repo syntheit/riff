@@ -38,6 +38,10 @@ pub struct LibraryList {
     /// The live model chain. `selection` feeds both views; `filter_model` root is
     /// re-pointed when the filter changes; `sorter` is invalidated on sort changes.
     filter_model: gtk::FilterListModel,
+    /// Kept alive so the sorted view survives (holds the chain together); read via
+    /// the views' selection model rather than directly.
+    #[allow(dead_code)]
+    sort_model: gtk::SortListModel,
     sorter: gtk::CustomSorter,
     pins: PinnedStore,
     sort: Rc<Cell<SortOrder>>,
@@ -102,7 +106,10 @@ impl LibraryList {
         let list_view = gtk::ListView::builder()
             .model(&selection)
             .factory(&list_factory)
-            .single_click_activate(false)
+            // Tap-to-open on touch: a single click/tap activates the row. A held
+            // press is intercepted by the long-press gesture below (which claims the
+            // sequence), so it opens the context drawer instead of activating.
+            .single_click_activate(true)
             .css_classes(["library-list"])
             .build();
 
@@ -132,7 +139,8 @@ impl LibraryList {
             .factory(&grid_factory)
             .min_columns(1)
             .max_columns(GRID_COLUMNS)
-            .single_click_activate(false)
+            // Tap-to-open (see the ListView note above).
+            .single_click_activate(true)
             .css_classes(["library-grid"])
             .build();
 

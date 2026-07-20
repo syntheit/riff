@@ -19,3 +19,23 @@
   min-height: 24px;
   padding: 0;
 }
+
+/* Cover art in list rows / grid tiles. */
+.library-cover {
+  border-radius: 6px;
+  background-color: alpha(currentColor, 0.08);
+}
+
+/* Round artwork for followed artists. */
+.library-cover-round {
+  border-radius: 9999px;
+}
+
+/* Virtualized views: keep row/tile padding tight and phone-appropriate. */
+.library-list > row {
+  padding: 2px 4px;
+}
+
+.library-grid > child {
+  padding: 4px;
+}

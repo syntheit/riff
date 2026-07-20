@@ -15,9 +15,9 @@ use std::rc::Rc;
 use super::library::PinnedStore;
 use crate::app::components::{Component, EventListener};
 use crate::app::loader::ImageLoader;
-use crate::app::models::{CardKind, LibraryItem, SongsSource};
+use crate::app::models::{CardKind, LibraryItem};
 use crate::app::state::{BrowserAction, PlaybackAction};
-use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, Worker};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, SongsSource, Worker};
 
 fn set_sheet_open(sheet: &gtk::Widget, open: bool) {
     sheet.set_property("open", open);
