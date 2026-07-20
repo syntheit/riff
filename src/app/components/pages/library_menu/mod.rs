@@ -313,7 +313,7 @@ fn art_thumbnail(url: Option<&str>, kind: CardKind, worker: &Worker) -> gtk::Ima
             }
         });
     } else {
-        image.set_from_icon_name(Some("library-music-symbolic"));
+        image.set_icon_name(Some("library-music-symbolic"));
     }
     image
 }

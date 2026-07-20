@@ -75,7 +75,7 @@ fn load_cover(
         } else {
             "library-music-symbolic"
         };
-        image.set_from_icon_name(Some(icon));
+        image.set_icon_name(Some(icon));
     }
 }
 
