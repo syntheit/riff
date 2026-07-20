@@ -133,6 +133,14 @@ mod imp {
                 _ => px,
             };
 
+            // GTK4 requires every child that will be allocated in size_allocate() to
+            // be measured (for the same orientation) during the measure pass — otherwise
+            // it warns "Allocating size to GtkPicture without calling gtk_widget_measure()"
+            // and the Picture's content rectangle collapses to zero, hiding the artwork.
+            // The cover carries a fixed size request (see sync_cover_size_request), so
+            // this measure just primes GTK's per-orientation size cache before allocation.
+            let _ = self.cover_image.measure(orientation, -1);
+
             if orientation == gtk::Orientation::Horizontal {
                 let w = match layout {
                     CardLayout::Horizontal => {
@@ -265,7 +273,27 @@ impl CardWidget {
         }
         self.add_css_class(size.css_class());
         self.imp().icon_size.set(size.pixel_size());
+        self.sync_cover_size_request();
         self.queue_resize();
+    }
+
+    /// Pin the cover Picture to the exact pixel size it will be allocated.
+    ///
+    /// A `GtkPicture` with `can-shrink: true` and no size request measures to a
+    /// natural size of 0 (skeleton state) or the paintable's own intrinsic size
+    /// (once loaded) — neither of which matches the fixed square we allocate in
+    /// `size_allocate`. Giving it an explicit width/height request makes its
+    /// measurement deterministic and equal to the allocation, mirroring how the
+    /// library views size their `gtk::Image` covers via `pixel_size`. Without
+    /// this the Picture is allocated a size it was never measured for, GTK warns
+    /// and the artwork collapses to nothing.
+    fn sync_cover_size_request(&self) {
+        let imp = self.imp();
+        let cover_px = match imp.layout.get() {
+            CardLayout::Horizontal => HORIZONTAL_COVER_SIZE,
+            _ => imp.icon_size.get(),
+        };
+        imp.cover_image.set_size_request(cover_px, cover_px);
     }
 
     /// Update the layout orientation, adjusting label visibility and alignment.
@@ -293,6 +321,7 @@ impl CardWidget {
                 imp.subtitle_label.set_halign(gtk::Align::Fill);
             }
         }
+        self.sync_cover_size_request();
         self.queue_resize();
     }
 
