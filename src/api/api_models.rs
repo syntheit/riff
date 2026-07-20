@@ -55,7 +55,7 @@ pub struct SearchQuery {
 
 impl SearchQuery {
     pub fn into_query_string(self) -> String {
-        let types = "album,track,artist";
+        let types = "album,track,artist,playlist";
 
         let re = Regex::new(r"(\W|\s)+").unwrap();
         let query = re.replace_all(&self.query[..], " ");
@@ -461,6 +461,8 @@ pub struct RawSearchResults {
     pub albums: Page<Album>,
     pub artists: Page<Artist>,
     pub tracks: Page<TrackItem>,
+    #[serde(default)]
+    pub playlists: Page<Playlist>,
 }
 
 impl From<Artist> for ArtistSummary {
@@ -815,7 +817,7 @@ mod tests {
             offset: 0,
         };
 
-        assert_eq!(query.into_query_string(), "type=album,track,artist&q=%D0%BA%D0%B8%D1%80%D0%B8%D0%BB%D0%BB%D0%B8%D1%86%D0%B0&offset=0&limit=5&market=from_token");
+        assert_eq!(query.into_query_string(), "type=album,track,artist,playlist&q=%D0%BA%D0%B8%D1%80%D0%B8%D0%BB%D0%BB%D0%B8%D1%86%D0%B0&offset=0&limit=5&market=from_token");
     }
 
     #[test]
@@ -828,7 +830,7 @@ mod tests {
 
         assert_eq!(
             query.into_query_string(),
-            "type=album,track,artist&q=test+wow&offset=0&limit=5&market=from_token"
+            "type=album,track,artist,playlist&q=test+wow&offset=0&limit=5&market=from_token"
         );
     }
 }

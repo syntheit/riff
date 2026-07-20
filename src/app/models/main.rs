@@ -111,6 +111,7 @@ pub struct SearchResults {
     pub albums: Vec<AlbumDescription>,
     pub artists: Vec<ArtistSummary>,
     pub tracks: SongBatch,
+    pub playlists: Vec<PlaylistDescription>,
 }
 
 #[derive(Clone, Debug)]

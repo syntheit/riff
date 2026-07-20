@@ -43,6 +43,9 @@ mod imp {
 
         #[template_child]
         pub track_results: TemplateChild<ResultSection>,
+
+        #[template_child]
+        pub playlist_results: TemplateChild<ResultSection>,
     }
 
     #[glib::object_subclass]
@@ -145,6 +148,7 @@ pub struct SearchResults {
     album_results_model: gio::ListStore,
     artist_results_model: gio::ListStore,
     track_results_model: gio::ListStore,
+    playlist_results_model: gio::ListStore,
     debouncer: Debouncer,
 }
 
@@ -156,6 +160,7 @@ impl SearchResults {
         let album_results_model = gio::ListStore::new::<CardModel>();
         let artist_results_model = gio::ListStore::new::<CardModel>();
         let track_results_model = gio::ListStore::new::<CardModel>();
+        let playlist_results_model = gio::ListStore::new::<CardModel>();
 
         widget.connect_go_back(clone!(
             #[weak]
@@ -200,7 +205,7 @@ impl SearchResults {
         );
 
         widget.bind_results(
-            worker,
+            worker.clone(),
             &widget.imp().track_results,
             &track_results_model,
             ImageShape::Square,
@@ -221,12 +226,26 @@ impl SearchResults {
             ),
         );
 
+        widget.bind_results(
+            worker,
+            &widget.imp().playlist_results,
+            &playlist_results_model,
+            ImageShape::Square,
+            CardSize::Large,
+            clone!(
+                #[weak]
+                model,
+                move |card_model| model.open_playlist(card_model.id())
+            ),
+        );
+
         Self {
             widget,
             model,
             track_results_model,
             album_results_model,
             artist_results_model,
+            playlist_results_model,
             debouncer: Debouncer::new(),
         }
     }
@@ -249,6 +268,12 @@ impl SearchResults {
         for track in results.tracks.songs.iter() {
             self.track_results_model
                 .append(&CardModel::from(track).with_data(track.clone()));
+        }
+
+        self.playlist_results_model.remove_all();
+        for playlist in results.playlists.iter() {
+            self.playlist_results_model
+                .append(&CardModel::from(playlist));
         }
     }
 

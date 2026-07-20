@@ -753,10 +753,17 @@ impl SpotifyApiClient for CachedSpotifyClient {
 
             let tracks = SongBatch::from(results.tracks);
 
+            let playlists = results
+                .playlists
+                .into_iter()
+                .map(|p| p.into())
+                .collect::<Vec<PlaylistDescription>>();
+
             Ok(SearchResults {
                 albums,
                 artists,
                 tracks,
+                playlists,
             })
         })
     }

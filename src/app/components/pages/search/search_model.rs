@@ -75,4 +75,8 @@ impl SearchResultsModel {
     pub fn open_artist(&self, id: String) {
         self.dispatcher.dispatch(AppAction::ViewArtist(id));
     }
+
+    pub fn open_playlist(&self, id: String) {
+        self.dispatcher.dispatch(AppAction::ViewPlaylist(id));
+    }
 }
