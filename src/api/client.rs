@@ -233,6 +233,7 @@ impl SpotifyClient {
     where
         B: Into<isahc::AsyncBody>,
     {
+        let dbg_uri = request.uri().clone();
         let mut result = self.client.send_async(request).await?;
 
         let etag = result
@@ -261,13 +262,16 @@ impl SpotifyClient {
                 max_age: cache_control.unwrap_or(10),
                 etag,
             }),
-            s => Err(SpotifyApiError::BadStatus(
-                s.as_u16(),
-                result
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "(no details available)".to_string()),
-            )),
+            s => {
+                error!("APIDBG2 {} -> {}", dbg_uri, s.as_u16());
+                Err(SpotifyApiError::BadStatus(
+                    s.as_u16(),
+                    result
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "(no details available)".to_string()),
+                ))
+            }
         }
     }
 

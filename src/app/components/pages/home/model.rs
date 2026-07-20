@@ -6,7 +6,7 @@ use crate::app::state::{HomeState, ScreenName};
 use crate::app::{ActionDispatcher, AppAction, AppModel, BrowserAction};
 
 /// Number of items to request for each personal-data shelf.
-const RECENTLY_PLAYED_LIMIT: usize = 50;
+const RECENTLY_PLAYED_LIMIT: usize = 20;
 const TOP_ARTISTS_LIMIT: usize = 20;
 const TOP_TRACKS_LIMIT: usize = 20;
 /// How many albums to pull for the "Because you listen to <artist>" shelf.
@@ -38,44 +38,66 @@ impl HomeFeedModel {
     /// Kick off every feed fetch. Each call is independent so a failing shelf
     /// (empty history, a 403 on an endpoint) just leaves its store empty and the
     /// shelf hides itself — the rest of the feed still loads.
+    ///
+    /// Errors from any shelf are swallowed silently (logged at error level but no
+    /// user-facing toast). `call_spotify_and_dispatch_many` is used with closures
+    /// that map `Err` to `Ok(vec![])` so the notification path is never reached.
     pub fn refresh_feed(&self) {
         // Recently played → track strip + "Jump back in" contexts (one fetch,
         // sliced two ways in the reducer).
         let api = self.app_model.get_spotify();
         self.dispatcher
-            .call_spotify_and_dispatch(move || async move {
-                api.recently_played(RECENTLY_PLAYED_LIMIT)
-                    .await
-                    .map(|(songs, contexts)| {
-                        BrowserAction::SetRecentlyPlayed(songs, contexts).into()
-                    })
+            .call_spotify_and_dispatch_many(move || async move {
+                match api.recently_played(RECENTLY_PLAYED_LIMIT).await {
+                    Ok((songs, contexts)) => {
+                        Ok(vec![
+                            BrowserAction::SetRecentlyPlayed(songs, contexts).into()
+                        ])
+                    }
+                    Err(e) => {
+                        error!("Home: recently_played failed (shelf hidden): {}", e);
+                        Ok(vec![])
+                    }
+                }
             });
 
         // Top artists (round cards).
         let api = self.app_model.get_spotify();
         self.dispatcher
-            .call_spotify_and_dispatch(move || async move {
-                api.get_top_artists(TOP_ARTISTS_LIMIT)
-                    .await
-                    .map(|artists| BrowserAction::SetTopArtists(artists).into())
+            .call_spotify_and_dispatch_many(move || async move {
+                match api.get_top_artists(TOP_ARTISTS_LIMIT).await {
+                    Ok(artists) => Ok(vec![BrowserAction::SetTopArtists(artists).into()]),
+                    Err(e) => {
+                        error!("Home: get_top_artists failed (shelf hidden): {}", e);
+                        Ok(vec![])
+                    }
+                }
             });
 
         // Top tracks.
         let api = self.app_model.get_spotify();
         self.dispatcher
-            .call_spotify_and_dispatch(move || async move {
-                api.get_top_tracks(TOP_TRACKS_LIMIT)
-                    .await
-                    .map(|songs| BrowserAction::SetTopTracks(songs).into())
+            .call_spotify_and_dispatch_many(move || async move {
+                match api.get_top_tracks(TOP_TRACKS_LIMIT).await {
+                    Ok(songs) => Ok(vec![BrowserAction::SetTopTracks(songs).into()]),
+                    Err(e) => {
+                        error!("Home: get_top_tracks failed (shelf hidden): {}", e);
+                        Ok(vec![])
+                    }
+                }
             });
 
         // "From your library" reuses the shared saved-albums store.
         let api = self.app_model.get_spotify();
         self.dispatcher
-            .call_spotify_and_dispatch(move || async move {
-                api.get_saved_albums(0, 20)
-                    .await
-                    .map(|albums| BrowserAction::SetLibraryContent(albums).into())
+            .call_spotify_and_dispatch_many(move || async move {
+                match api.get_saved_albums(0, 20).await {
+                    Ok(albums) => Ok(vec![BrowserAction::SetLibraryContent(albums).into()]),
+                    Err(e) => {
+                        error!("Home: get_saved_albums failed (shelf hidden): {}", e);
+                        Ok(vec![])
+                    }
+                }
             });
 
         self.refresh_made_for_you();
@@ -87,16 +109,34 @@ impl HomeFeedModel {
     fn refresh_made_for_you(&self) {
         let api = self.app_model.get_spotify();
         self.dispatcher
-            .call_spotify_and_dispatch(move || async move {
-                let artists = api.get_top_artists(TOP_ARTISTS_LIMIT).await?;
+            .call_spotify_and_dispatch_many(move || async move {
+                let artists = match api.get_top_artists(TOP_ARTISTS_LIMIT).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        error!(
+                            "Home: made-for-you top_artists failed (shelf hidden): {}",
+                            e
+                        );
+                        return Ok(vec![]);
+                    }
+                };
                 let Some(seed) = artists.into_iter().next() else {
-                    return Ok(BrowserAction::SetMadeForYou(String::new(), vec![]).into());
+                    return Ok(vec![
+                        BrowserAction::SetMadeForYou(String::new(), vec![]).into()
+                    ]);
                 };
                 let name = seed.name.clone();
-                let albums = api
-                    .get_artist_albums(&seed.id, 0, MADE_FOR_YOU_LIMIT)
-                    .await?;
-                Ok(BrowserAction::SetMadeForYou(name, albums).into())
+                let albums = match api.get_artist_albums(&seed.id, 0, MADE_FOR_YOU_LIMIT).await {
+                    Ok(a) => a,
+                    Err(e) => {
+                        error!(
+                            "Home: made-for-you get_artist_albums failed (shelf hidden): {}",
+                            e
+                        );
+                        return Ok(vec![]);
+                    }
+                };
+                Ok(vec![BrowserAction::SetMadeForYou(name, albums).into()])
             });
     }
 
