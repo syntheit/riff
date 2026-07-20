@@ -173,7 +173,8 @@ pub struct Playlist {
     pub id: String,
     pub name: String,
     pub images: Option<Vec<Image>>,
-    pub tracks: Page<PlaylistTrack>,
+    #[serde(default)]
+    pub tracks: Option<Page<PlaylistTrack>>,
     pub owner: PlaylistOwner,
     pub snapshot_id: Option<String>,
 }
@@ -688,7 +689,9 @@ impl From<Playlist> for PlaylistDescription {
             id: owner_id,
             display_name,
         } = owner;
-        let song_batch = tracks.into();
+        // `tracks` may be absent in `/me/playlists` responses from dev-mode apps;
+        // treat a missing field as an empty batch (track_count = 0).
+        let song_batch = tracks.unwrap_or_default().into();
         PlaylistDescription {
             id,
             title: name,
@@ -780,6 +783,28 @@ mod tests {
         let artists: Vec<ArtistSummary> = parsed.into_iter().map(ArtistSummary::from).collect();
         assert_eq!(artists.len(), 1);
         assert_eq!(artists[0].name, "Artist");
+    }
+
+    #[test]
+    fn test_playlist_missing_tracks_field() {
+        // Dev-mode apps may omit `tracks` entirely; the list must still parse and
+        // produce a PlaylistDescription with track_count = 0.
+        let json = r#"{"id":"pl1","name":"My List","images":null,"owner":{"id":"u","display_name":"U"},"snapshot_id":"snap1"}"#;
+        let deserialized: Playlist = serde_json::from_str(json).unwrap();
+        assert!(deserialized.tracks.is_none());
+        let desc = PlaylistDescription::from(deserialized);
+        assert_eq!(desc.id, "pl1");
+        assert_eq!(desc.songs.batch.total, 0);
+    }
+
+    #[test]
+    fn test_playlist_with_tracks_field() {
+        // When `tracks` IS present (e.g. from get_playlist with fields filter),
+        // it must still deserialize and produce a correct total.
+        let json = r#"{"id":"pl2","name":"Full","images":null,"owner":{"id":"u","display_name":"U"},"snapshot_id":null,"tracks":{"items":[],"total":42,"offset":0,"limit":50}}"#;
+        let deserialized: Playlist = serde_json::from_str(json).unwrap();
+        assert!(deserialized.tracks.is_some());
+        assert_eq!(deserialized.tracks.as_ref().unwrap().total(), 42);
     }
 
     #[test]

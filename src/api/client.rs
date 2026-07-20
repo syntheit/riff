@@ -328,6 +328,7 @@ impl SpotifyClient {
     }
 
     pub(crate) fn recently_played(&self, limit: usize) -> SpotifyRequest<'_, (), RecentlyPlayed> {
+        let limit = limit.clamp(1, 50);
         let query = make_query_params()
             .append_pair("limit", &limit.to_string()[..])
             .finish();
@@ -338,6 +339,7 @@ impl SpotifyClient {
     }
 
     pub(crate) fn get_top_artists(&self, limit: usize) -> SpotifyRequest<'_, (), Page<Artist>> {
+        let limit = limit.clamp(1, 50);
         let query = make_query_params()
             .append_pair("time_range", "medium_term")
             .append_pair("limit", &limit.to_string()[..])
@@ -351,6 +353,7 @@ impl SpotifyClient {
     // `/me/top/tracks` is a paged `{items:[…]}` list — distinct from the
     // artist-scoped `TopTracks` (`{tracks:[…]}`) used by `get_artist_top_tracks`.
     pub(crate) fn get_top_tracks(&self, limit: usize) -> SpotifyRequest<'_, (), Page<TrackItem>> {
+        let limit = limit.clamp(1, 50);
         let query = make_query_params()
             .append_pair("time_range", "medium_term")
             .append_pair("limit", &limit.to_string()[..])
