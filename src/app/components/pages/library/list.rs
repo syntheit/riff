@@ -362,37 +362,48 @@ fn compare_cards(
         (false, false) => {}
     }
 
-    let base = base_compare(sort, a, b);
-    if descending {
-        base.reverse()
-    } else {
-        base
-    }
+    base_compare(sort, descending, a, b)
 }
 
-/// The un-directional comparison for a sort order. "Ascending" here means the
-/// natural, human-expected default for that order (recent = insertion order,
-/// alphabetic = A→Z, largest = biggest track count first). The caller reverses it
-/// for descending.
-fn base_compare(sort: SortOrder, a: &CardModel, b: &CardModel) -> std::cmp::Ordering {
+/// The comparison for a sort order, honouring `descending`. Only the primary key
+/// is reversed by `descending`; the stable tiebreaker (insertion order, then id)
+/// always stays ascending so the result is deterministic in both directions, and
+/// unknown track counts (0 — e.g. artists) always sort last regardless of
+/// direction rather than jumping to the top when the "Largest" order is flipped.
+fn base_compare(
+    sort: SortOrder,
+    descending: bool,
+    a: &CardModel,
+    b: &CardModel,
+) -> std::cmp::Ordering {
     use std::cmp::Ordering;
-    match sort {
-        SortOrder::Alphabetic => a
-            .title()
-            .to_lowercase()
-            .cmp(&b.title().to_lowercase()),
+    let primary = match sort {
+        SortOrder::Alphabetic => a.title().to_lowercase().cmp(&b.title().to_lowercase()),
         SortOrder::Size => {
-            // Largest first by default; unknown counts (0, e.g. artists) sort last.
+            // Largest first by default; unknown counts (0) always sort last, in both
+            // directions (they represent "no count", not "the smallest count").
             let (a_count, b_count) = (a.track_count(), b.track_count());
             match (a_count, b_count) {
-                (0, 0) => a.insertion_position().cmp(&b.insertion_position()),
-                (0, _) => Ordering::Greater,
-                (_, 0) => Ordering::Less,
+                (0, 0) => Ordering::Equal,
+                (0, _) => return Ordering::Greater,
+                (_, 0) => return Ordering::Less,
+                // b vs a → largest first as the natural (ascending-flag) direction.
                 _ => b_count.cmp(&a_count),
             }
         }
         // RecentlyAdded (and any other order not offered on this screen) falls back
         // to insertion order, which mirrors the API fetch order.
         _ => a.insertion_position().cmp(&b.insertion_position()),
-    }
+    };
+    let primary = if descending { primary.reverse() } else { primary };
+    primary.then_with(|| stable_tiebreak(a, b))
+}
+
+/// A deterministic tiebreaker used when a sort key compares equal (same track
+/// count, same title). Falls back to the source insertion order, then the id, so
+/// equal-keyed items keep a stable, repeatable position instead of shuffling.
+fn stable_tiebreak(a: &CardModel, b: &CardModel) -> std::cmp::Ordering {
+    a.insertion_position()
+        .cmp(&b.insertion_position())
+        .then_with(|| a.id().cmp(&b.id()))
 }

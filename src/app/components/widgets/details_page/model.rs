@@ -317,6 +317,7 @@ mod tests {
         stub_api_method!(search(_query: &str, _offset: usize, _limit: usize) -> SearchResults);
         stub_api_method!(get_artist_albums(_id: &str, _offset: usize, _limit: usize) -> Vec<AlbumDescription>);
         stub_api_method!(get_user(_id: &str) -> UserDescription);
+        stub_api_method!(get_current_user() -> CurrentUser);
         stub_api_method!(get_user_playlists(_id: &str, _offset: usize, _limit: usize) -> Vec<PlaylistDescription>);
         stub_api_method!(list_available_devices() -> Vec<ConnectDevice>);
         stub_api_method!(get_player_queue() -> Vec<SongDescription>);

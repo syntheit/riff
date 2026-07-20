@@ -96,6 +96,11 @@ pub trait SpotifyApiClient {
 
     fn get_user(&self, id: &str) -> BoxFuture<SpotifyResult<UserDescription>>;
 
+    /// The logged-in user's own profile (`/me`). Lightweight — just id, display
+    /// name and avatar URL — so it can populate the top-right profile button
+    /// without the heavy playlist fetch that `get_user` performs.
+    fn get_current_user(&self) -> BoxFuture<SpotifyResult<CurrentUser>>;
+
     fn get_user_playlists(
         &self,
         id: &str,
@@ -170,6 +175,7 @@ enum RiffCacheKey<'a> {
     Artist(&'a str),
     ArtistTopTracks(&'a str),
     User(&'a str),
+    Me,
     UserPlaylists(&'a str, usize, usize),
     RecentlyPlayed(usize),
     TopArtists(usize),
@@ -197,6 +203,7 @@ impl RiffCacheKey<'_> {
             Self::Artist(id) => format!("artist_{id}.json"),
             Self::ArtistTopTracks(id) => format!("artist_top_tracks_{id}.json"),
             Self::User(id) => format!("user_{id}.json"),
+            Self::Me => "me.json".to_string(),
             Self::UserPlaylists(id, offset, limit) => {
                 format!("user_playlists_{id}_{offset}_{limit}.json")
             }
@@ -212,7 +219,7 @@ lazy_static! {
     pub static ref ME_ALBUMS_CACHE: Regex = Regex::new(r"^me_albums_\w+_\w+\.json$").unwrap();
     pub static ref ME_PLAYLISTS_CACHE: Regex = Regex::new(r"^me_playlists_\w+_\w+\.json$").unwrap();
     pub static ref USER_CACHE: Regex = Regex::new(
-        r"^me_(albums|playlists|tracks)_\w+_\w+\.json$|^me_(recently_played|top_artists|top_tracks)_\w+\.json$"
+        r"^me\.json$|^me_(albums|playlists|tracks)_\w+_\w+\.json$|^me_(recently_played|top_artists|top_tracks)_\w+\.json$"
     )
     .unwrap();
 }
@@ -821,6 +828,27 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 playlists: playlists?,
             };
             Ok(result)
+        })
+    }
+
+    fn get_current_user(&self) -> BoxFuture<SpotifyResult<CurrentUser>> {
+        Box::pin(async move {
+            let user = self
+                .cache_get_or_write(RiffCacheKey::Me, None, |etag| {
+                    self.client.get_me().etag(etag).send()
+                })
+                .await?;
+            // Pick the first non-empty avatar URL (Spotify lists them small→large).
+            let image_url = user
+                .images()
+                .iter()
+                .map(|i| i.url.clone())
+                .find(|u| !u.is_empty());
+            Ok(CurrentUser {
+                id: user.id,
+                display_name: user.display_name,
+                image_url,
+            })
         })
     }
 

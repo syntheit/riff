@@ -19,6 +19,13 @@ pub enum LoginAction {
     OpenLoginUrl(Url),
     TryLogin(TryLoginAction),
     SetLoginSuccess(String),
+    /// The logged-in user's profile details from `/me`: display name and avatar
+    /// image URL (None when the account has no picture). Drives the top-right
+    /// profile button.
+    SetUserDetails {
+        display_name: String,
+        image_url: Option<String>,
+    },
     SetUserPlaylists(Vec<PlaylistSummary>),
     UpdateUserPlaylist(PlaylistSummary),
     PrependUserPlaylist(Vec<PlaylistSummary>),
@@ -48,6 +55,7 @@ pub enum LoginEvent {
     LoginShown,
     LoginStarted(LoginStartedEvent),
     LoginCompleted,
+    UserDetailsLoaded,
     UserPlaylistsLoaded,
     LoginFailed,
     FreshTokenRequested,
@@ -65,6 +73,10 @@ impl From<LoginEvent> for AppEvent {
 pub struct LoginState {
     // Username
     pub user: Option<String>,
+    // Display name from /me (falls back to the username in the UI when None)
+    pub user_display_name: Option<String>,
+    // Avatar image URL from /me, for the top-right profile button (None = no picture)
+    pub user_image_url: Option<String>,
     // Playlists owned by the logged in user
     pub playlists: Vec<PlaylistSummary>,
     // Playlist IDs for O(1) ownership checks
@@ -93,6 +105,14 @@ impl UpdatableState for LoginState {
                 self.user = Some(username);
                 vec![LoginEvent::LoginCompleted.into()]
             }
+            LoginAction::SetUserDetails {
+                display_name,
+                image_url,
+            } => {
+                self.user_display_name = Some(display_name);
+                self.user_image_url = image_url;
+                vec![LoginEvent::UserDetailsLoaded.into()]
+            }
             LoginAction::SetLoginFailure => vec![LoginEvent::LoginFailed.into()],
             LoginAction::RefreshToken => vec![LoginEvent::FreshTokenRequested.into()],
             LoginAction::TokenRefreshed => {
@@ -104,6 +124,8 @@ impl UpdatableState for LoginState {
             }
             LoginAction::Logout => {
                 self.user = None;
+                self.user_display_name = None;
+                self.user_image_url = None;
                 vec![LoginEvent::LogoutCompleted.into()]
             }
             LoginAction::SetUserPlaylists(playlists) => {
