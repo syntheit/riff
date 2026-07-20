@@ -72,6 +72,7 @@ impl SearchQuery {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct Page<T> {
     // Spotify occasionally returns `null` entries inside an items list (e.g. an
     // unavailable/region-locked saved playlist or a delisted track). A plain
@@ -168,6 +169,7 @@ pub struct Cursors {
 }
 
 #[derive(Deserialize, Debug, Clone)]
+#[serde(bound(deserialize = "T: Deserialize<'de>"))]
 pub struct CursorPage<T> {
     // Same null-item tolerance as `Page<T>` (see `deserialize_nullable_items`).
     #[serde(default, deserialize_with = "deserialize_nullable_items")]
