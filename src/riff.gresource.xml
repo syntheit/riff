@@ -7,6 +7,8 @@
     <file>skeleton_override.css</file>
     <!-- login -->
     <file alias="components/login.ui">app/components/pages/login/login.ui</file>
+    <!-- home -->
+    <file alias="components/home.css">app/components/pages/home/home.css</file>
     <!-- library -->
     <file alias="components/library.css">app/components/pages/library/library.css</file>
     <!-- settings -->

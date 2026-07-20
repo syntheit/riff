@@ -330,6 +330,9 @@ mod tests {
         stub_api_method!(player_play_no_context(_device_id: String, _uris: Vec<String>, _offset: usize) -> ());
         stub_api_method!(player_state() -> ConnectPlayerState);
         stub_api_method!(get_followed_artists(_after: Option<String>, _limit: usize) -> (Vec<ArtistSummary>, Option<String>));
+        stub_api_method!(recently_played(_limit: usize) -> (Vec<SongDescription>, Vec<JumpBackContext>));
+        stub_api_method!(get_top_artists(_limit: usize) -> Vec<ArtistSummary>);
+        stub_api_method!(get_top_tracks(_limit: usize) -> Vec<SongDescription>);
         stub_api_method!(follow_artist(_id: &str) -> ());
         stub_api_method!(unfollow_artist(_id: &str) -> ());
         stub_api_method!(get_playlist_track_ids(_id: &str) -> Vec<String>);

@@ -41,24 +41,15 @@ impl ScreenFactory {
         screen
     }
 
-    /// The "Home" tab. Currently a saved-albums grid (kept functional as-is);
-    /// the redesigned unified library lives under the Library tab.
-    pub fn make_library(&self) -> impl ListenerComponent {
-        let model = SavedAlbumsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
-        let screen_model = DefaultHeaderBarModel::new(
-            Some(gettext("Home")),
-            None,
+    /// The "Home" tab: a Spotify-style personal feed of horizontal card shelves
+    /// (recently played, top artists/tracks, a "Because you listen to <artist>"
+    /// mix, and saved-library albums).
+    pub fn make_home(&self) -> impl ListenerComponent {
+        let model = Rc::new(HomeFeedModel::new(
             Rc::clone(&self.app_model),
             self.dispatcher.box_clone(),
-        );
-        let page = make_saved_albums(
-            self.worker.clone(),
-            model,
-            Rc::clone(&self.shared_layout),
-            Rc::clone(&self.shared_size),
-            Rc::clone(&self.dispatcher),
-        );
-        Self::make_card_page(page, screen_model)
+        ));
+        HomeScreen::new(model, self.worker.clone())
     }
 
     /// The unified Spotify-style "Your Library" screen (filter pills + sort +
@@ -82,9 +73,29 @@ impl ScreenFactory {
         Sidebar::new(listbox, Rc::new(model))
     }
 
-    // The standalone saved-playlists / saved-artists grids are superseded by the
-    // unified library screen's filter pills, but kept as ready-to-mount detail
-    // targets (and to preserve their page modules).
+    // The standalone saved-albums / saved-playlists / saved-artists grids are
+    // superseded by the home feed and the unified library screen's filter pills,
+    // but kept as ready-to-mount detail targets (and to preserve their page
+    // modules).
+    #[allow(dead_code)]
+    pub fn make_saved_albums(&self) -> impl ListenerComponent {
+        let model = SavedAlbumsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());
+        let screen_model = DefaultHeaderBarModel::new(
+            Some(gettext("Albums")),
+            None,
+            Rc::clone(&self.app_model),
+            self.dispatcher.box_clone(),
+        );
+        let page = make_saved_albums(
+            self.worker.clone(),
+            model,
+            Rc::clone(&self.shared_layout),
+            Rc::clone(&self.shared_size),
+            Rc::clone(&self.dispatcher),
+        );
+        Self::make_card_page(page, screen_model)
+    }
+
     #[allow(dead_code)]
     pub fn make_saved_playlists(&self) -> impl ListenerComponent {
         let model =

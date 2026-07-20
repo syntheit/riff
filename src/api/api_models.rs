@@ -80,7 +80,7 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
-    fn new(items: Vec<T>) -> Self {
+    pub(crate) fn new(items: Vec<T>) -> Self {
         let l = items.len();
         Self {
             total: l,
@@ -391,6 +391,32 @@ impl From<PlayerState> for ConnectPlayerState {
 #[derive(Deserialize, Debug, Clone)]
 pub struct TopTracks {
     pub tracks: Vec<TrackItem>,
+}
+
+// `/me/player/recently-played` returns a cursor-paged list of play-history
+// objects (a track plus when and in what context it was played).
+#[derive(Deserialize, Debug, Clone)]
+pub struct RecentlyPlayed {
+    pub items: Option<Vec<PlayHistory>>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)] // `played_at`/`context` are part of the response but unused: the
+                    // home feed derives its shelves from the track's album instead.
+pub struct PlayHistory {
+    pub track: TrackItem,
+    pub played_at: Option<String>,
+    pub context: Option<PlayContext>,
+}
+
+// The context a track was played in (album/playlist/artist). Absent for songs
+// played outside any context, so every field is optional.
+#[derive(Deserialize, Debug, Clone)]
+#[allow(dead_code)] // Part of the Spotify API response but currently unused.
+pub struct PlayContext {
+    #[serde(alias = "type")]
+    pub type_: Option<String>,
+    pub uri: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -724,6 +750,36 @@ mod tests {
         let deserialized: PlaylistTrack = serde_json::from_str(track).unwrap();
         let track_item: Option<TrackItem> = deserialized.try_into().ok();
         assert!(track_item.is_some());
+    }
+
+    #[test]
+    fn test_recently_played_parsing() {
+        let json = r#"{"items":[{"track":{"album":{"artists":[{"id":"a","name":"Artist"}],"id":"alb","images":[{"height":64,"url":"http://img","width":64}],"name":"Album"},"artists":[{"id":"a","name":"Artist"}],"duration_ms":1,"id":"t1","name":"Track","uri":"spotify:track:t1"},"played_at":"2026-07-19T00:00:00Z","context":{"type":"album","uri":"spotify:album:alb"}}]}"#;
+        let parsed: RecentlyPlayed = serde_json::from_str(json).unwrap();
+        let items = parsed.items.unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].track.track.id, "t1");
+        assert_eq!(items[0].track.album.id, "alb");
+    }
+
+    #[test]
+    fn test_top_tracks_page_parsing() {
+        // `/me/top/tracks` is a paged `{items:[…]}`, distinct from the artist
+        // `TopTracks` (`{tracks:[…]}`) shape.
+        let json = r#"{"items":[{"album":{"artists":[{"id":"a","name":"Artist"}],"id":"alb","images":[{"height":64,"url":"http://img","width":64}],"name":"Album"},"artists":[{"id":"a","name":"Artist"}],"duration_ms":1,"id":"t1","name":"Track","uri":"spotify:track:t1"}],"total":1}"#;
+        let parsed: Page<TrackItem> = serde_json::from_str(json).unwrap();
+        let songs: Vec<SongDescription> = parsed.into();
+        assert_eq!(songs.len(), 1);
+        assert_eq!(songs[0].album.id, "alb");
+    }
+
+    #[test]
+    fn test_top_artists_page_parsing() {
+        let json = r#"{"items":[{"id":"a","name":"Artist","images":[{"height":64,"url":"http://img","width":64}],"popularity":80}],"total":1}"#;
+        let parsed: Page<Artist> = serde_json::from_str(json).unwrap();
+        let artists: Vec<ArtistSummary> = parsed.into_iter().map(ArtistSummary::from).collect();
+        assert_eq!(artists.len(), 1);
+        assert_eq!(artists[0].name, "Artist");
     }
 
     #[test]

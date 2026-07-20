@@ -293,6 +293,24 @@ pub struct ArtistSummary {
     pub popularity: u32,
 }
 
+/// A recently-played context (the album or playlist a track was played in),
+/// used to build the "Jump back in" shelf on the home feed. Opening one
+/// navigates to that album/playlist detail page.
+#[derive(Clone, Debug)]
+pub struct JumpBackContext {
+    pub id: String,
+    pub kind: JumpBackKind,
+    pub title: String,
+    pub subtitle: String,
+    pub art: Option<ImageSet>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JumpBackKind {
+    Album,
+    Playlist,
+}
+
 #[derive(Clone, Debug)]
 pub struct UserDescription {
     pub id: String,

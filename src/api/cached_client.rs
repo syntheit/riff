@@ -141,6 +141,17 @@ pub trait SpotifyApiClient {
         limit: usize,
     ) -> BoxFuture<SpotifyResult<(Vec<ArtistSummary>, Option<String>)>>;
 
+    /// Recently-played tracks (newest first). Returns the track strip plus the
+    /// deduplicated album/playlist contexts for the "Jump back in" shelf.
+    fn recently_played(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<SpotifyResult<(Vec<SongDescription>, Vec<JumpBackContext>)>>;
+
+    fn get_top_artists(&self, limit: usize) -> BoxFuture<SpotifyResult<Vec<ArtistSummary>>>;
+
+    fn get_top_tracks(&self, limit: usize) -> BoxFuture<SpotifyResult<Vec<SongDescription>>>;
+
     fn follow_artist(&self, id: &str) -> BoxFuture<SpotifyResult<()>>;
 
     fn unfollow_artist(&self, id: &str) -> BoxFuture<SpotifyResult<()>>;
@@ -160,6 +171,9 @@ enum RiffCacheKey<'a> {
     ArtistTopTracks(&'a str),
     User(&'a str),
     UserPlaylists(&'a str, usize, usize),
+    RecentlyPlayed(usize),
+    TopArtists(usize),
+    TopTracks(usize),
 }
 
 impl RiffCacheKey<'_> {
@@ -186,6 +200,9 @@ impl RiffCacheKey<'_> {
             Self::UserPlaylists(id, offset, limit) => {
                 format!("user_playlists_{id}_{offset}_{limit}.json")
             }
+            Self::RecentlyPlayed(limit) => format!("me_recently_played_{limit}.json"),
+            Self::TopArtists(limit) => format!("me_top_artists_{limit}.json"),
+            Self::TopTracks(limit) => format!("me_top_tracks_{limit}.json"),
         }
     }
 }
@@ -194,8 +211,10 @@ lazy_static! {
     pub static ref ME_TRACKS_CACHE: Regex = Regex::new(r"^me_tracks_\w+_\w+\.json$").unwrap();
     pub static ref ME_ALBUMS_CACHE: Regex = Regex::new(r"^me_albums_\w+_\w+\.json$").unwrap();
     pub static ref ME_PLAYLISTS_CACHE: Regex = Regex::new(r"^me_playlists_\w+_\w+\.json$").unwrap();
-    pub static ref USER_CACHE: Regex =
-        Regex::new(r"^me_(albums|playlists|tracks)_\w+_\w+\.json$").unwrap();
+    pub static ref USER_CACHE: Regex = Regex::new(
+        r"^me_(albums|playlists|tracks)_\w+_\w+\.json$|^me_(recently_played|top_artists|top_tracks)_\w+\.json$"
+    )
+    .unwrap();
 }
 
 fn playlist_cache_key(id: &str) -> Regex {
@@ -954,6 +973,92 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .collect();
 
             Ok((artists, cursor))
+        })
+    }
+
+    fn recently_played(
+        &self,
+        limit: usize,
+    ) -> BoxFuture<SpotifyResult<(Vec<SongDescription>, Vec<JumpBackContext>)>> {
+        Box::pin(async move {
+            // Short TTL so Home feels live; the response's own cache-control is
+            // short, so `wrap_write` already keeps this from going stale for long.
+            let recent = self
+                .cache_get_or_write(RiffCacheKey::RecentlyPlayed(limit), None, |etag| {
+                    self.client.recently_played(limit).etag(etag).send()
+                })
+                .await?;
+
+            let items = recent.items.unwrap_or_default();
+
+            // Jump-back contexts: the album each track was played from, deduped by
+            // album id and kept in play order (newest first). Only albums carry
+            // real art/title from this endpoint, so playlist-context plays fall
+            // back to their album — every card stays visually correct.
+            let mut seen_albums = std::collections::HashSet::<String>::new();
+            let contexts = items
+                .iter()
+                .filter_map(|history| {
+                    let album = &history.track.album;
+                    if album.id.is_empty() || !seen_albums.insert(album.id.clone()) {
+                        return None;
+                    }
+                    let art = ImageSet::from_images(
+                        album.images().iter().map(|i| (i.width, i.url.clone())),
+                    );
+                    let subtitle = history
+                        .track
+                        .track
+                        .artists
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Some(JumpBackContext {
+                        id: album.id.clone(),
+                        kind: JumpBackKind::Album,
+                        title: album.name.clone(),
+                        subtitle,
+                        art,
+                    })
+                })
+                .collect();
+
+            // Track strip: dedup consecutive/repeat plays of the same track,
+            // keeping the most recent occurrence's order.
+            let mut seen_tracks = std::collections::HashSet::<String>::new();
+            let tracks: Vec<TrackItem> = items
+                .into_iter()
+                .map(|history| history.track)
+                .filter(|t| seen_tracks.insert(t.track.id.clone()))
+                .collect();
+
+            let songs: Vec<SongDescription> = Page::new(tracks).into();
+            Ok((songs, contexts))
+        })
+    }
+
+    fn get_top_artists(&self, limit: usize) -> BoxFuture<SpotifyResult<Vec<ArtistSummary>>> {
+        Box::pin(async move {
+            let page = self
+                .cache_get_or_write(RiffCacheKey::TopArtists(limit), None, |etag| {
+                    self.client.get_top_artists(limit).etag(etag).send()
+                })
+                .await?;
+
+            Ok(page.into_iter().map(ArtistSummary::from).collect())
+        })
+    }
+
+    fn get_top_tracks(&self, limit: usize) -> BoxFuture<SpotifyResult<Vec<SongDescription>>> {
+        Box::pin(async move {
+            let page = self
+                .cache_get_or_write(RiffCacheKey::TopTracks(limit), None, |etag| {
+                    self.client.get_top_tracks(limit).etag(etag).send()
+                })
+                .await?;
+
+            Ok(page.into())
         })
     }
 
