@@ -44,11 +44,11 @@ msgstr "Could not save password. Make sure the session keyring is unlocked."
 msgid "An error occured. Check logs for details!"
 msgstr "An error occured. Check logs for details!"
 
-#. translators: This is a sidebar entry to browse to saved albums.
+#. translators: This is a sidebar entry / bottom tab that browses the user's library.
 #: src/app/components/navigation/factory.rs:33
 #: src/app/components/sidebar/sidebar_item.rs:39
 msgid "Library"
-msgstr "Albums"
+msgstr "Library"
 
 #. translators: This is a sidebar entry to browse to saved playlists.
 #: src/app/components/navigation/factory.rs:54

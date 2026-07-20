@@ -14,15 +14,35 @@ use std::time::Duration;
 // JSON file in riff's cache dir means later launches only re-fetch the playlists
 // that actually changed.
 
+// Schema version of the on-disk membership index. Bump this whenever the format
+// or the indexing logic changes in a way that makes older caches wrong: `load()`
+// discards any file whose `version` differs, forcing a clean re-sync. This is the
+// guard against a bad build silently poisoning the cache with incomplete data and
+// having `is_fresh` keep serving it. Bumped from the implicit v0 (unversioned).
+const MEMBERSHIP_CACHE_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct MembershipEntry {
     pub snapshot_id: String,
     pub track_ids: HashSet<String>,
 }
 
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Serialize, Deserialize)]
 pub struct MembershipIndex {
+    // Serialized schema tag. Defaults to 0 when absent (an old, unversioned file),
+    // which never equals the current version, so such files are discarded on load.
+    #[serde(default)]
+    version: u32,
     entries: HashMap<String, MembershipEntry>,
+}
+
+impl Default for MembershipIndex {
+    fn default() -> Self {
+        Self {
+            version: MEMBERSHIP_CACHE_VERSION,
+            entries: HashMap::new(),
+        }
+    }
 }
 
 impl MembershipIndex {
@@ -34,14 +54,20 @@ impl MembershipIndex {
         path
     }
 
-    // Read the index from disk. A missing or malformed file yields an empty index
-    // rather than an error — the worst case is a full re-sync.
+    // Read the index from disk. A missing, malformed, or version-mismatched file
+    // yields an empty (current-version) index rather than an error — the worst case
+    // is a full re-sync. Discarding on version mismatch is what stops an incompatible
+    // cache (e.g. one an old build wrote with incomplete data) from being served.
     pub fn load() -> Self {
         let path = Self::path();
-        match std::fs::read(&path) {
+        let parsed: Self = match std::fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
-            Err(_) => Self::default(),
+            Err(_) => return Self::default(),
+        };
+        if parsed.version != MEMBERSHIP_CACHE_VERSION {
+            return Self::default();
         }
+        parsed
     }
 
     pub fn save(&self) {
@@ -58,13 +84,6 @@ impl MembershipIndex {
             (Some(entry), Some(snap)) => entry.snapshot_id == snap,
             _ => false,
         }
-    }
-
-    // Whether this playlist has an index entry at all (as opposed to a miss because
-    // the background sync has not reached it yet). Used only by ATPDBG3 diagnostics
-    // to distinguish "indexed but song absent" from "not yet indexed".
-    pub fn is_indexed(&self, playlist_id: &str) -> bool {
-        self.entries.contains_key(playlist_id)
     }
 
     // Synchronous membership test used by the drawer rows. Returns false when the

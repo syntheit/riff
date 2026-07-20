@@ -8,6 +8,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 
+use crate::app::components::utils::Debouncer;
 use crate::app::components::{Component, EventListener};
 use crate::app::loader::ImageLoader;
 use crate::app::models::SongDescription;
@@ -19,6 +20,13 @@ use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, Worker};
 // The open drawer is rebuilt every this-many freshly-indexed playlists so
 // checkmarks appear steadily rather than after every single fetch.
 const SYNC_REBUILD_BATCH: usize = 4;
+
+// The sync's live drawer refresh is coalesced by this window. A full rebuild
+// resets the ListView scroll to the top and re-realizes every visible row (each
+// firing a fresh art load), so firing one mid-scroll is exactly what made the
+// list feel janky. Debouncing means a burst of freshly-indexed playlists produces
+// one rebuild after the churn settles rather than one every few fetches.
+const SYNC_REBUILD_DEBOUNCE_MS: u32 = 400;
 
 fn set_sheet_open(sheet: &gtk::Widget, open: bool) {
     sheet.set_property("open", open);
@@ -149,6 +157,47 @@ pub struct AddToPlaylist {
     /// Owned-playlist list + snapshot-keyed membership index, persisted to disk and
     /// filled by the background sync. Shared with the drawer rows and the Save diff.
     cache: SharedMembershipCache,
+    /// Coalesces the sync's live drawer refreshes so a re-sync doesn't rebuild the
+    /// list (resetting scroll + re-storming art) every few playlists while the user
+    /// is scrolling the open sheet.
+    rebuild_debouncer: Debouncer,
+    /// Fingerprint of what the drawer last rendered: the owned-playlist id list plus
+    /// the set of playlists the current song is in. A sync refresh only rebuilds when
+    /// this actually changes, so indexing playlists the song isn't in never disturbs
+    /// the open list.
+    last_render_fingerprint: Rc<RefCell<Option<RenderFingerprint>>>,
+}
+
+// What the drawer showed at the last render, used to skip no-op sync rebuilds.
+// `owned` is the ordered owned-playlist ids (so new/removed playlists force a
+// rebuild); `member_of` is the subset that contains the current song (so a
+// flipping checkmark forces a rebuild); `syncing` tracks the "Checking your
+// playlists…" hint so the final sync-complete refresh (which only clears the hint)
+// isn't skipped. Anything else the sync indexes leaves the visible list unchanged.
+#[derive(PartialEq)]
+struct RenderFingerprint {
+    song_id: String,
+    owned: Vec<String>,
+    member_of: HashSet<String>,
+    syncing: bool,
+}
+
+impl RenderFingerprint {
+    fn compute(song_id: &str, playlists: &[OwnedPlaylist], cache: &SharedMembershipCache) -> Self {
+        let syncing = cache.is_syncing();
+        let index = cache.index();
+        let member_of = playlists
+            .iter()
+            .filter(|p| index.contains(&p.id, song_id))
+            .map(|p| p.id.clone())
+            .collect();
+        Self {
+            song_id: song_id.to_owned(),
+            owned: playlists.iter().map(|p| p.id.clone()).collect(),
+            member_of,
+            syncing,
+        }
+    }
 }
 
 impl AddToPlaylist {
@@ -168,10 +217,15 @@ impl AddToPlaylist {
             staged_removes: Rc::new(RefCell::new(HashSet::new())),
             known_playlist_ids: Rc::new(RefCell::new(HashSet::new())),
             cache: SharedMembershipCache::load(),
+            rebuild_debouncer: Debouncer::new(),
+            last_render_fingerprint: Rc::new(RefCell::new(None)),
         }
     }
 
     fn build_for(&self, song: &SongDescription) {
+        // A user-initiated (new song / drawer opened) build always renders
+        // immediately and unconditionally; record its fingerprint so subsequent
+        // sync refreshes can tell whether anything visible changed.
         rebuild_drawer(
             song,
             &self.sheet,
@@ -183,6 +237,11 @@ impl AddToPlaylist {
             &self.known_playlist_ids,
             &self.cache,
         );
+        *self.last_render_fingerprint.borrow_mut() = Some(RenderFingerprint::compute(
+            &song.id,
+            &self.cache.owned_playlists(),
+            &self.cache,
+        ));
     }
 
     // Kick the background sync: resolve the owned playlists from the authoritative
@@ -202,8 +261,13 @@ impl AddToPlaylist {
         );
     }
 
-    // A cheap-to-clone closure that rebuilds the drawer for the current song when
-    // it is open. Handed to the background sync so it can refresh as it progresses.
+    // A cheap-to-clone closure the background sync calls as it progresses. It only
+    // touches the drawer when the sheet is open AND the visible state actually
+    // changed (owned list or the current song's membership), and even then defers
+    // the rebuild through a debouncer so a re-sync's steady trickle of newly-indexed
+    // playlists can't rebuild the list — resetting scroll and re-storming art loads —
+    // out from under a user who is mid-scroll. When nothing visible changed (the
+    // common case: indexing playlists the song isn't in) it does nothing at all.
     fn rebuild_closure(&self) -> Rc<dyn Fn()> {
         let sheet = self.sheet.clone();
         let host = self.host.clone();
@@ -214,6 +278,8 @@ impl AddToPlaylist {
         let known_playlist_ids = self.known_playlist_ids.clone();
         let cache = self.cache.clone();
         let current_song = self.current_song.clone();
+        let debouncer = self.rebuild_debouncer.clone();
+        let last_fingerprint = self.last_render_fingerprint.clone();
         Rc::new(move || {
             let Some(song) = current_song.borrow().clone() else {
                 return;
@@ -221,17 +287,52 @@ impl AddToPlaylist {
             if !sheet.property::<bool>("open") {
                 return;
             }
-            rebuild_drawer(
-                &song,
-                &sheet,
-                &host,
-                &model,
-                &worker,
-                &staged_adds,
-                &staged_removes,
-                &known_playlist_ids,
-                &cache,
-            );
+
+            // Skip when nothing the drawer shows for this song changed. Indexing a
+            // playlist the song isn't in flips no checkmark and adds no row, so a
+            // rebuild would only throw away scroll position and re-fire art loads.
+            let fingerprint =
+                RenderFingerprint::compute(&song.id, &cache.owned_playlists(), &cache);
+            if last_fingerprint.borrow().as_ref() == Some(&fingerprint) {
+                return;
+            }
+
+            // Something visible changed; coalesce the rebuild so a burst of qualifying
+            // changes lands as a single refresh once the churn settles.
+            let sheet = sheet.clone();
+            let host = host.clone();
+            let model = model.clone();
+            let worker = worker.clone();
+            let staged_adds = staged_adds.clone();
+            let staged_removes = staged_removes.clone();
+            let known_playlist_ids = known_playlist_ids.clone();
+            let cache = cache.clone();
+            let last_fingerprint = last_fingerprint.clone();
+            let current_song = current_song.clone();
+            debouncer.debounce(SYNC_REBUILD_DEBOUNCE_MS, move || {
+                let Some(song) = current_song.borrow().clone() else {
+                    return;
+                };
+                if !sheet.property::<bool>("open") {
+                    return;
+                }
+                rebuild_drawer(
+                    &song,
+                    &sheet,
+                    &host,
+                    &model,
+                    &worker,
+                    &staged_adds,
+                    &staged_removes,
+                    &known_playlist_ids,
+                    &cache,
+                );
+                *last_fingerprint.borrow_mut() = Some(RenderFingerprint::compute(
+                    &song.id,
+                    &cache.owned_playlists(),
+                    &cache,
+                ));
+            });
         })
     }
 }
@@ -301,8 +402,6 @@ fn sync_owned_playlists(
     rebuild();
 
     worker.send_local_task(async move {
-        error!("ATPDBG3 sync start user={user_id}");
-
         // Resolve the owned playlists from the authoritative saved-playlists list,
         // which carries owner ids (the home cards drop them).
         const PAGE: usize = 50;
@@ -341,8 +440,6 @@ fn sync_owned_playlists(
             }
         }
 
-        error!("ATPDBG3 owned count={}", owned.len());
-
         cache.set_owned_playlists(owned.clone());
         rebuild();
 
@@ -363,12 +460,6 @@ fn sync_owned_playlists(
                 }
             };
             let set: HashSet<String> = ids.into_iter().collect();
-            error!(
-                "ATPDBG3 indexed {} ({}): {} tracks",
-                pl.id,
-                pl.title,
-                set.len()
-            );
 
             // Only a persistent (snapshot-keyed) entry can be skipped next launch; a
             // playlist with no snapshot is still indexed for this session's checks.
@@ -385,7 +476,6 @@ fn sync_owned_playlists(
             }
         }
 
-        error!("ATPDBG3 sync complete ({} owned)", owned.len());
         cache.set_syncing(false);
         cache.schedule_save();
         rebuild();
@@ -566,14 +656,6 @@ fn build_drawer_ui(
         let index = cache.index();
         for pl in playlists {
             let in_playlist = index.contains(&pl.id, &song_id);
-            error!(
-                "ATPDBG3 row {} id={} contains={} indexed={} song_id={}",
-                pl.title,
-                pl.id,
-                in_playlist,
-                index.is_indexed(&pl.id),
-                song_id,
-            );
             store.append(&PlaylistRowModel::new(
                 &pl.id,
                 &pl.title,

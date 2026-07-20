@@ -97,6 +97,41 @@ impl Navigation {
             &gettext("Library"),
             "library-music-symbolic",
         );
+
+        // Belt-and-suspenders: force the title + icon on each AdwViewStackPage
+        // directly, bypassing the gettext catalog entirely. The bottom
+        // AdwViewSwitcherBar renders the *page* title, and a bad `en` translation
+        // (`msgid "Library"` → `msgstr "Albums"`) made the Library tab read
+        // "Albums" no matter how many rebuilds we did. Using literal titles here
+        // means the switcher label can never be poisoned by the .po again.
+        // "library-music-symbolic" ships in riff's own gresource (see
+        // riff.gresource.xml), so it always resolves regardless of the device's
+        // system icon theme; "go-home-symbolic"/"system-search-symbolic" are stock
+        // GTK/Adwaita symbolics.
+        let home_page = self.tab_stack.page(home.get_root_widget());
+        home_page.set_title(Some(&gettext("Home")));
+        home_page.set_icon_name(Some("go-home-symbolic"));
+
+        let search_page = self.tab_stack.page(search.get_root_widget());
+        search_page.set_title(Some(&gettext("Search")));
+        search_page.set_icon_name(Some("system-search-symbolic"));
+
+        let library_page = self.tab_stack.page(library.get_root_widget());
+        library_page.set_title(Some("Library"));
+        library_page.set_icon_name(Some("library-music-symbolic"));
+
+        // Diagnostic: print the ACTUAL titles/icons the switcher will render for
+        // each tab, so a device run confirms the Library tab reads "Library".
+        // (Strip once verified on-device.)
+        for page in [&home_page, &search_page, &library_page] {
+            error!(
+                "TABDBG name={:?} title={:?} icon={:?}",
+                page.name(),
+                page.title(),
+                page.icon_name(),
+            );
+        }
+
         self.tab_stack.set_visible_child_name("home");
 
         // Tapping a bottom tab while a detail page is open returns to the tab shell.
