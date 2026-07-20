@@ -1,0 +1,34 @@
+/* Full-width, comfortable search field pinned at the top. */
+.search-entry {
+  margin: 8px 12px 4px 12px;
+  min-height: 44px;
+  border-radius: 8px;
+}
+
+/* Filter pills: same look as the library filter pills (accent-filled when
+   checked, muted otherwise). */
+.search-pill {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.search-pill:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+/* Compact result rows. Small thumbnail, tight vertical padding. */
+.search-list > row {
+  padding: 2px 4px;
+}
+
+/* Cover art in the compact result rows. */
+.search-cover {
+  border-radius: 4px;
+  background-color: alpha(currentColor, 0.08);
+}
+
+/* Round artwork for artist results. */
+.search-cover-round {
+  border-radius: 9999px;
+}

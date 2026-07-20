@@ -4,76 +4,59 @@ using Adw 1;
 template $SearchResultsWidget : Box {
   orientation: vertical;
   can-focus: true;
+  vexpand: true;
 
-  Adw.HeaderBar main_header {
-    show-end-title-buttons: true;
-    show-back-button: false;
+  // (a) Full-width, comfortable search field pinned at the very top. Top margin
+  // clears the floating ⋯ menu button that lives at the top-right of the shell
+  // (window.blp). No HeaderBar: search is a bottom tab like the Library screen.
+  SearchEntry search_entry {
+    receives-default: true;
+    can-focus: true;
+    hexpand: true;
+    margin-top: 44;
+    /* Translators: placeholder text in the search field. */
+    placeholder-text: _("What do you want to listen to?");
 
-    Button go_back {
-      halign: start;
-      valign: center;
-      icon-name: "go-previous-symbolic";
-      has-frame: false;
-      focus-on-click: false;
-      can-focus: false;
-    }
+    styles [
+      "search-entry",
+    ]
+  }
 
-    [title]
-    SearchEntry search_entry {
-      receives-default: true;
-      can-focus: true;
+  // (b) Horizontally-scrollable filter-pill row (All / Songs / Artists / Albums /
+  // Playlists). The pills themselves are built in Rust into `pill_row`.
+  ScrolledWindow {
+    vscrollbar-policy: never;
+    propagate-natural-height: true;
+
+    Box pill_row {
+      orientation: horizontal;
+      spacing: 8;
+      margin-start: 12;
+      margin-end: 12;
+      margin-top: 4;
+      margin-bottom: 6;
     }
   }
 
-  Overlay overlay {
+  // (c) One compact, vertically-scrolling result list that fills the remaining
+  // space above the on-screen keyboard. The ListView child is built in Rust.
+  Overlay {
     hexpand: true;
     vexpand: true;
 
-    ScrolledWindow search_results {
+    ScrolledWindow results_scroll {
       visible: false;
       hexpand: true;
       vexpand: true;
       hscrollbar-policy: never;
-      Box {
-        vexpand: false;
-        margin-start: 8;
-        margin-end: 8;
-        margin-top: 8;
-        margin-bottom: 8;
-        orientation: vertical;
-        spacing: 8;
-
-        $ResultSection track_results {
-          /* Translators: This is the title of a section of the search results */
-          label: _("Tracks");
-        }
-
-        $ResultSection album_results {
-          /* Translators: This is the title of a section of the search results */
-          label: _("Albums");
-
-        }
-        $ResultSection artist_results {
-          /* Translators: This is the title of a section of the search results */
-          label: _("Artists");
-
-        }
-        $ResultSection playlist_results {
-          /* Translators: This is the title of a section of the search results */
-          label: _("Playlists");
-
-        }
-      }
     }
 
     [overlay]
     Adw.StatusPage status_page {
       /* Translators: Title for the empty search page (initial state). */
-
       title: _("Search Spotify.");
 
       /* Translators: Subtitle for the empty search page (initial state). */
-
       description: _("Type to search.");
       icon-name: "system-search-symbolic";
       visible: true;
