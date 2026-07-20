@@ -72,6 +72,16 @@ impl CardModel {
         self
     }
 
+    /// Set whether this item is locally pinned. Pinned items float to the top of
+    /// the library list regardless of the active sort order.
+    pub fn set_pinned(&self, pinned: bool) {
+        self.set_property("pinned", pinned);
+    }
+
+    pub fn is_pinned(&self) -> bool {
+        self.property::<bool>("pinned")
+    }
+
     pub fn card_kind(&self) -> CardKind {
         CardKind::from_u8(self.property::<u32>("kind") as u8)
     }
@@ -159,6 +169,9 @@ mod imp {
         /// Whether the artwork renders round (followed artists) vs square.
         #[property(get, set, name = "is-round")]
         is_round: Cell<bool>,
+        /// Whether the item is locally pinned (floats to the top of the library).
+        #[property(get, set)]
+        pinned: Cell<bool>,
 
         pub data: RefCell<Option<Box<dyn Any + 'static>>>,
     }

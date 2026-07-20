@@ -230,6 +230,26 @@ impl LibraryModel {
         CardKind::None
     }
 
+    /// The backing `gio::ListStore` for the current filter, so the virtualized view
+    /// can point its model chain straight at it (updates propagate via
+    /// `items-changed` — no mirroring). Returns None before login/state exists.
+    pub fn current_source_store(&self) -> Option<gio::ListStore> {
+        Some(CardListModel::get_store(self)?.inner().clone())
+    }
+
+    /// Find the `CardModel` for an id across every source store. Used by the
+    /// long-press drawer to render the item card and pick the right unsave/unfollow
+    /// action. The synthetic "Liked Songs" row is resolved separately by the caller.
+    pub fn card_for(&self, id: &str) -> Option<CardModel> {
+        let state = self.state()?;
+        for store in [&state.playlists, &state.albums, &state.artists] {
+            if let Some(card) = store.iter().find(|c| c.id() == id) {
+                return Some(card);
+            }
+        }
+        None
+    }
+
     /// User-facing empty-state copy for the current filter.
     pub fn empty_title(&self) -> String {
         match self.filter.get() {

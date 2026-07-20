@@ -238,6 +238,7 @@ impl Default for RiffSettings {
 }
 
 /// Observes some app state changes and records them into GSettings.
+#[derive(Clone)]
 pub struct StateTracker {
     settings: gio::Settings,
 }
@@ -343,6 +344,33 @@ impl StateTracker {
             SortOrder::parse_key(self.settings.string(&key).as_str())
         } else {
             SortOrder::RecentlyAdded
+        }
+    }
+
+    /// Persist the sort DIRECTION (descending) for a page. Stored in a boolean
+    /// `sort-{page}-descending` gsetting; a no-op if the schema lacks the key
+    /// (older schema → defaults to ascending on load).
+    pub fn save_sort_descending(&self, page: &str, descending: bool) {
+        let key = format!("sort-{page}-descending");
+        if self
+            .settings
+            .settings_schema()
+            .map_or(false, |s| s.has_key(&key))
+        {
+            let _ = self.settings.set_boolean(&key, descending);
+        }
+    }
+
+    pub fn load_sort_descending(&self, page: &str) -> bool {
+        let key = format!("sort-{page}-descending");
+        if self
+            .settings
+            .settings_schema()
+            .map_or(false, |s| s.has_key(&key))
+        {
+            self.settings.boolean(&key)
+        } else {
+            false
         }
     }
 }

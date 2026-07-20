@@ -4,30 +4,21 @@ use std::rc::Rc;
 use gettextrs::gettext;
 use gtk::prelude::*;
 
+use super::list::{LibraryList, LibraryListCallbacks};
 use super::model::{LibraryFilter, LibraryModel};
-use crate::app::components::{
-    display_add_css_provider, CardLayout, CardList, CardListModel, CardSize, Component,
-    EventListener, SortOrder,
-};
+use super::pinned_store::PinnedStore;
+use crate::app::components::{CardLayout, CardListModel, Component, EventListener, SortOrder};
 use crate::app::dispatch::Worker;
+use crate::app::models::LibraryItem;
 use crate::app::state::LoginEvent;
-use crate::app::{ActionDispatcher, AppEvent, BrowserAction, BrowserEvent};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, BrowserAction, BrowserEvent};
 use crate::settings::StateTracker;
-
-/// Number of columns in grid mode on a phone-width screen.
-const GRID_COLUMNS: u32 = 3;
 
 /// Margin around the card list content.
 const CONTENT_MARGIN: i32 = 12;
 
-/// The Library screen always renders its grid at Small (100 px) so that 3 columns
-/// (3 × 100 + spacing/margins ≈ 330 px) comfortably fit the phone's ~540 px logical
-/// width. This is independent of the global card-size gsetting, which controls other
-/// pages (Home, album/artist detail grids).
-const LIBRARY_CARD_SIZE: CardSize = CardSize::Small;
-
 /// Top margin (px) added to the "Library" title so it clears the floating ⋯ menu
-/// button that lives at margin-top: 4 + ~40 px button height in window.blp.
+/// button that now lives at the top-RIGHT of the header (window.blp).
 const TITLE_TOP_MARGIN: i32 = 48;
 
 /// The library screen's own page id, used for sort persistence (`sort-library`).
@@ -41,21 +32,17 @@ const SORT_ORDERS: [SortOrder; 3] = [
 ];
 
 /// The unified "Library" screen: a large title, a filter-pill row, a toolbar
-/// (sort on the left, grid/list toggle on the right) and a card list that shows
-/// a compact list or a 3-column grid over the user's saved content.
+/// (toggleable sort on the left, grid/list toggle on the right) and a virtualized
+/// list/grid over the user's saved content. Backed by `gtk::ListView`/`gtk::GridView`
+/// so scrolling stays smooth with hundreds of items.
 pub struct LibraryScreen {
     root: gtk::Box,
     model: Rc<LibraryModel>,
-    card_list: Rc<CardList>,
-    worker: Worker,
+    list: Rc<LibraryList>,
     status_page: libadwaita::StatusPage,
-    scrolled_window: gtk::ScrolledWindow,
     layout: Rc<Cell<CardLayout>>,
-    /// Held to keep the shared Rc alive; this screen ignores the global size setting
-    /// and always renders at LIBRARY_CARD_SIZE (Small/100 px).
-    _size: Rc<Cell<CardSize>>,
     current_sort: Rc<Cell<SortOrder>>,
-    toggle_button: gtk::Button,
+    descending: Rc<Cell<bool>>,
 }
 
 impl LibraryScreen {
@@ -63,19 +50,20 @@ impl LibraryScreen {
         model: Rc<LibraryModel>,
         worker: Worker,
         layout: Rc<Cell<CardLayout>>,
-        size: Rc<Cell<CardSize>>,
+        _size: Rc<Cell<crate::app::components::CardSize>>,
         dispatcher: Rc<dyn ActionDispatcher>,
+        pins: PinnedStore,
     ) -> Self {
-        display_add_css_provider(resource!("/components/library.css"));
+        crate::app::components::display_add_css_provider(resource!("/components/library.css"));
 
         let tracker = StateTracker::new_from_gsettings();
-        let current_sort = Rc::new(Cell::new(tracker.load_sort_order("library")));
+        let current_sort = Rc::new(Cell::new(tracker.load_sort_order(PAGE_ID)));
+        let descending = Rc::new(Cell::new(tracker.load_sort_descending(PAGE_ID)));
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_vexpand(true);
 
-        // (a) Big in-content title — TITLE_TOP_MARGIN pushes it below the floating
-        // ⋯ menu button (window.blp: margin-top 4 + ~40 px button height).
+        // (a) Big in-content title.
         let title = gtk::Label::new(Some(&gettext("Library")));
         title.set_halign(gtk::Align::Start);
         title.set_margin_start(CONTENT_MARGIN);
@@ -84,55 +72,87 @@ impl LibraryScreen {
         title.add_css_class("library-title");
         root.append(&title);
 
-        // (b) Filter-pill row
+        // (b) Filter-pill row.
         let (pill_row, clear_button, pills) = Self::build_pill_row();
         root.append(&pill_row);
 
-        // (c) Toolbar: sort left, grid/list toggle right
-        let card_list = Rc::new(CardList::new());
-        let (toolbar, toggle_button) = Self::build_toolbar(
-            &current_sort,
-            &layout,
-            Rc::clone(&card_list),
-            Rc::clone(&dispatcher),
+        // (c) The virtualized list/grid. Built before the toolbar so the toolbar
+        // handlers can capture it.
+        let callbacks = LibraryListCallbacks {
+            on_activate: {
+                let model = Rc::downgrade(&model);
+                Box::new(move |id| {
+                    if let Some(model) = model.upgrade() {
+                        model.open_item(id);
+                    }
+                })
+            },
+            on_long_press: {
+                let model = Rc::downgrade(&model);
+                let pins = pins.clone();
+                let dispatcher = Rc::clone(&dispatcher);
+                Box::new(move |id| {
+                    if let Some(item) = build_library_item(model.upgrade().as_deref(), &pins, &id) {
+                        dispatcher.dispatch(AppAction::ShowLibraryItemMenu(item));
+                    }
+                })
+            },
+        };
+        let list = LibraryList::new(
+            worker.clone(),
+            pins.clone(),
+            current_sort.get(),
+            descending.get(),
+            callbacks,
         );
+
+        let (sort_button, toggle_button) = Self::build_toolbar(
+            &current_sort,
+            &descending,
+            &layout,
+            Rc::clone(&list),
+            Rc::clone(&dispatcher),
+            &tracker,
+        );
+
+        // Toolbar box (sort left, grid/list toggle right).
+        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        toolbar.set_margin_start(CONTENT_MARGIN);
+        toolbar.set_margin_end(CONTENT_MARGIN);
+        toolbar.set_margin_top(2);
+        toolbar.set_margin_bottom(2);
+        toolbar.append(&sort_button);
+        toolbar.append(&toggle_button);
         root.append(&toolbar);
 
-        // (d) Content: scrolled card list with an empty-state overlay
-        card_list.widget().set_margin_start(CONTENT_MARGIN);
-        card_list.widget().set_margin_end(CONTENT_MARGIN);
-        card_list.widget().set_margin_bottom(CONTENT_MARGIN);
+        // (d) Content: the list/grid with an empty-state overlay.
+        list.widget().set_margin_start(CONTENT_MARGIN);
+        list.widget().set_margin_end(CONTENT_MARGIN);
+        list.widget().set_margin_bottom(CONTENT_MARGIN);
 
         let status_page = libadwaita::StatusPage::new();
         status_page.set_icon_name(Some("library-music-symbolic"));
         status_page.set_visible(false);
 
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(card_list.widget()));
+        overlay.set_child(Some(list.widget()));
         overlay.add_overlay(&status_page);
+        overlay.set_vexpand(true);
+        root.append(&overlay);
 
-        let scrolled_window = gtk::ScrolledWindow::new();
-        scrolled_window.set_vexpand(true);
-        scrolled_window.set_hscrollbar_policy(gtk::PolicyType::Never);
-        scrolled_window.set_child(Some(&overlay));
-        root.append(&scrolled_window);
+        list.set_layout(layout.get());
 
         let screen = Self {
             root,
             model,
-            card_list,
-            worker,
+            list,
             status_page,
-            scrolled_window,
             layout,
-            _size: size,
             current_sort,
-            toggle_button,
+            descending,
         };
 
-        screen.apply_grid_columns();
         screen.rebind();
-        screen.card_list.show_placeholders();
         screen.connect_infinite_scroll();
         screen.connect_pills(&pills, &clear_button);
 
@@ -140,7 +160,6 @@ impl LibraryScreen {
     }
 
     /// Build the horizontally-scrollable pill row plus a leading "✕" clear pill.
-    /// Returns the row, the clear button, and the three filter toggles.
     fn build_pill_row() -> (gtk::ScrolledWindow, gtk::Button, [gtk::ToggleButton; 3]) {
         let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         row.set_margin_start(CONTENT_MARGIN);
@@ -148,7 +167,6 @@ impl LibraryScreen {
         row.set_margin_top(CONTENT_MARGIN);
         row.set_margin_bottom(6);
 
-        // Leading clear pill, shown only when a filter is active.
         let clear_button = gtk::Button::from_icon_name("window-close-symbolic");
         clear_button.add_css_class("circular");
         clear_button.add_css_class("library-pill-clear");
@@ -159,7 +177,6 @@ impl LibraryScreen {
         let playlists = Self::make_pill(&gettext("Playlists"));
         let albums = Self::make_pill(&gettext("Albums"));
         let artists = Self::make_pill(&gettext("Artists"));
-        // Group for mutual exclusion (only one active at a time).
         albums.set_group(Some(&playlists));
         artists.set_group(Some(&playlists));
         row.append(&playlists);
@@ -181,26 +198,24 @@ impl LibraryScreen {
         btn
     }
 
+    /// Build the toolbar's sort button (with popover) and grid/list toggle button.
+    /// Returns `(sort_button, toggle_button)`.
     fn build_toolbar(
         current_sort: &Rc<Cell<SortOrder>>,
+        descending: &Rc<Cell<bool>>,
         layout: &Rc<Cell<CardLayout>>,
-        card_list: Rc<CardList>,
+        list: Rc<LibraryList>,
         dispatcher: Rc<dyn ActionDispatcher>,
-    ) -> (gtk::Box, gtk::Button) {
-        let toolbar = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        toolbar.set_margin_start(CONTENT_MARGIN);
-        toolbar.set_margin_end(CONTENT_MARGIN);
-        toolbar.set_margin_top(2);
-        toolbar.set_margin_bottom(2);
-
-        // LEFT: sort menu button labelled with the current sort.
+        tracker: &StateTracker,
+    ) -> (gtk::MenuButton, gtk::Button) {
+        // LEFT: sort menu button showing the current sort + a direction arrow.
         let sort_button = gtk::MenuButton::new();
         sort_button.add_css_class("flat");
         sort_button.set_halign(gtk::Align::Start);
         sort_button.set_hexpand(true);
 
         let sort_content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        let sort_icon = gtk::Image::from_icon_name("view-sort-descending-symbolic");
+        let sort_icon = gtk::Image::from_icon_name(direction_icon(descending.get()));
         let sort_label = gtk::Label::new(Some(&current_sort.get().label()));
         sort_content.append(&sort_icon);
         sort_content.append(&sort_label);
@@ -215,13 +230,16 @@ impl LibraryScreen {
         Self::populate_sort_options(
             &sort_box,
             current_sort,
-            &card_list,
+            descending,
+            &list,
             &dispatcher,
             &sort_label,
+            &sort_icon,
+            &popover,
+            tracker,
         );
         popover.set_child(Some(&sort_box));
         sort_button.set_popover(Some(&popover));
-        toolbar.append(&sort_button);
 
         // RIGHT: grid/list toggle.
         let toggle_button = gtk::Button::new();
@@ -230,107 +248,103 @@ impl LibraryScreen {
         toggle_button.set_tooltip_text(Some(&gettext("Toggle grid or list view")));
 
         let layout_ref = Rc::clone(layout);
-        let card_list_ref = Rc::clone(&card_list);
+        let list_ref = Rc::clone(&list);
         toggle_button.connect_clicked(move |btn| {
-            // Two-state toggle between grid (vertical) and list (horizontal).
             let next = match layout_ref.get() {
                 CardLayout::Horizontal => CardLayout::Vertical,
                 _ => CardLayout::Horizontal,
             };
             layout_ref.set(next);
             btn.set_icon_name(toggle_icon(next));
-            card_list_ref.update_layout(next);
+            list_ref.set_layout(next);
             dispatcher.dispatch(BrowserAction::ChangeCardLayout(next).into());
         });
-        toolbar.append(&toggle_button);
 
-        (toolbar, toggle_button)
+        (sort_button, toggle_button)
     }
 
-    /// Fill the sort popover with the three radio options for this screen.
-    /// Selecting one re-sorts the list, updates the button label and persists it.
+    /// Fill the sort popover with three radio options. Selecting the ALREADY-active
+    /// option flips ascending/descending; selecting a different one switches to it
+    /// (keeping its default direction). Both update the button label + arrow and
+    /// re-sort the list instantly via the SortListModel.
+    #[allow(clippy::too_many_arguments)]
     fn populate_sort_options(
         sort_box: &gtk::Box,
         current_sort: &Rc<Cell<SortOrder>>,
-        card_list: &Rc<CardList>,
+        descending: &Rc<Cell<bool>>,
+        list: &Rc<LibraryList>,
         dispatcher: &Rc<dyn ActionDispatcher>,
         sort_label: &gtk::Label,
+        sort_icon: &gtk::Image,
+        popover: &gtk::Popover,
+        tracker: &StateTracker,
     ) {
-        let mut group: Option<gtk::CheckButton> = None;
         for order in SORT_ORDERS {
-            let btn = gtk::CheckButton::with_label(&order.label());
-            if let Some(ref g) = group {
-                btn.set_group(Some(g));
-            } else {
-                group = Some(btn.clone());
-            }
-            btn.set_active(order == current_sort.get());
+            let btn = gtk::Button::new();
+            btn.add_css_class("flat");
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            let check = gtk::Image::from_icon_name("object-select-symbolic");
+            check.set_visible(order == current_sort.get());
+            let label = gtk::Label::new(Some(&order.label()));
+            label.set_hexpand(true);
+            label.set_xalign(0.0);
+            let arrow = gtk::Image::from_icon_name(direction_icon(descending.get()));
+            arrow.set_visible(order == current_sort.get());
+            content.append(&check);
+            content.append(&label);
+            content.append(&arrow);
+            btn.set_child(Some(&content));
 
             let sort_ref = Rc::clone(current_sort);
-            let card_list_ref = Rc::clone(card_list);
+            let desc_ref = Rc::clone(descending);
+            let list_ref = Rc::clone(list);
             let dispatch = Rc::clone(dispatcher);
-            let label = sort_label.clone();
-            btn.connect_toggled(move |b| {
-                if b.is_active() {
+            let button_label = sort_label.clone();
+            let button_icon = sort_icon.clone();
+            let popover = popover.clone();
+            let tracker = tracker.clone();
+            btn.connect_clicked(move |_| {
+                if order == sort_ref.get() {
+                    // Tapping the active sort flips its direction.
+                    desc_ref.set(!desc_ref.get());
+                } else {
                     sort_ref.set(order);
-                    card_list_ref.set_sort(order);
-                    label.set_label(&order.label());
-                    dispatch.dispatch(
-                        BrowserAction::ChangeSortOrder(PAGE_ID.to_string(), order).into(),
-                    );
+                    // A fresh order starts in its natural direction (ascending flag
+                    // = false → the sort's default: A→Z, largest-first, recent-first).
+                    desc_ref.set(false);
                 }
+                list_ref.set_sort(sort_ref.get(), desc_ref.get());
+                button_label.set_label(&sort_ref.get().label());
+                button_icon.set_icon_name(Some(direction_icon(desc_ref.get())));
+                dispatch.dispatch(
+                    BrowserAction::ChangeSortOrder(PAGE_ID.to_string(), sort_ref.get()).into(),
+                );
+                tracker.save_sort_descending(PAGE_ID, desc_ref.get());
+                popover.popdown();
             });
             sort_box.append(&btn);
         }
     }
 
-    /// Bind the card list to the store for the current filter and apply the
-    /// current sort. Called on creation and on every filter change.
+    /// Point the list at the current filter's store and apply sort + empty state.
     fn rebind(&self) {
         if self.model.filter() == LibraryFilter::All {
             self.model.reconcile_combined();
         }
-        // Always use LIBRARY_CARD_SIZE (Small/100 px) regardless of the shared
-        // card-size gsetting so 3 columns fit the phone's logical width (~540 px).
-        self.card_list.bind(
-            &self.model,
-            self.worker.clone(),
-            self.layout.get(),
-            LIBRARY_CARD_SIZE,
-        );
-        if self.current_sort.get() != SortOrder::RecentlyAdded {
-            self.card_list.set_sort(self.current_sort.get());
+        if let Some(store) = self.model.current_source_store() {
+            self.list.set_source(&store);
         }
+        self.list.set_sort(self.current_sort.get(), self.descending.get());
         self.update_empty_state();
     }
 
-    /// Grid uses up to 3-column layout on phones; list is single-column.
-    /// min_children_per_line is always 1 so a narrow window never demands N×card-width
-    /// as its minimum; max caps the grid at GRID_COLUMNS (3) in grid mode.
-    fn apply_grid_columns(&self) {
-        let (min_cols, max_cols) = if self.layout.get() == CardLayout::Horizontal {
-            (1, 1)
-        } else {
-            (1, GRID_COLUMNS)
-        };
-        self.card_list.widget().set_min_children_per_line(min_cols);
-        self.card_list.widget().set_max_children_per_line(max_cols);
-    }
-
     fn connect_infinite_scroll(&self) {
-        let card_list_weak = Rc::downgrade(&self.card_list);
         let model_weak = Rc::downgrade(&self.model);
-        self.scrolled_window.connect_edge_reached(move |_, pos| {
-            if pos != gtk::PositionType::Bottom {
-                return;
-            }
-            let (Some(model), Some(card_list)) = (model_weak.upgrade(), card_list_weak.upgrade())
-            else {
-                return;
-            };
-            if CardListModel::has_more(&*model) {
-                card_list.append_placeholders();
-                CardListModel::load_more(&*model);
+        self.list.connect_edge_reached(move || {
+            if let Some(model) = model_weak.upgrade() {
+                if CardListModel::has_more(&*model) {
+                    CardListModel::load_more(&*model);
+                }
             }
         });
     }
@@ -343,67 +357,47 @@ impl LibraryScreen {
         ];
         for (pill, filter) in pills.iter().zip(filters) {
             let model = Rc::downgrade(&self.model);
+            let list = Rc::downgrade(&self.list);
+            let status_page = self.status_page.clone();
             let clear = clear_button.clone();
-            let this = self.weak_rebind_closure();
             pill.connect_toggled(move |btn| {
-                // Grouped toggles behave like radios: only the "activated" edge
-                // is a real filter change; deactivation happens when another pill
-                // or the ✕ clear button takes over.
                 if !btn.is_active() {
                     return;
                 }
-                let Some(model) = model.upgrade() else {
+                let (Some(model), Some(list)) = (model.upgrade(), list.upgrade()) else {
                     return;
                 };
                 model.set_filter(filter);
+                model.clear_combined();
                 clear.set_visible(true);
-                this();
+                if let Some(store) = model.current_source_store() {
+                    list.set_source(&store);
+                }
+                list.scroll_to_top();
+                update_empty(&model, &status_page);
             });
         }
 
-        // Clear pill resets every toggle, dropping back to All.
         let pills = pills.clone();
         let model = Rc::downgrade(&self.model);
-        let this = self.weak_rebind_closure();
+        let list = Rc::downgrade(&self.list);
+        let status_page = self.status_page.clone();
         clear_button.connect_clicked(move |btn| {
             for pill in pills.iter() {
                 pill.set_active(false);
             }
             btn.set_visible(false);
-            if let Some(model) = model.upgrade() {
-                model.set_filter(LibraryFilter::All);
-            }
-            this();
-        });
-    }
-
-    /// Produce a callback that re-binds the list and scrolls to the top, used by
-    /// the pill handlers (which can't borrow `self`).
-    fn weak_rebind_closure(&self) -> impl Fn() {
-        let model = Rc::downgrade(&self.model);
-        let card_list = Rc::downgrade(&self.card_list);
-        let status_page = self.status_page.clone();
-        let scrolled = self.scrolled_window.clone();
-        let worker = self.worker.clone();
-        let layout = Rc::clone(&self.layout);
-        let sort = Rc::clone(&self.current_sort);
-        move || {
-            let (Some(model), Some(card_list)) = (model.upgrade(), card_list.upgrade()) else {
+            let (Some(model), Some(list)) = (model.upgrade(), list.upgrade()) else {
                 return;
             };
-            if model.filter() == LibraryFilter::All {
-                model.reconcile_combined();
-            } else {
-                model.clear_combined();
+            model.set_filter(LibraryFilter::All);
+            model.reconcile_combined();
+            if let Some(store) = model.current_source_store() {
+                list.set_source(&store);
             }
-            // Always bind with LIBRARY_CARD_SIZE (Small/100 px) — see rebind().
-            card_list.bind(&model, worker.clone(), layout.get(), LIBRARY_CARD_SIZE);
-            if sort.get() != SortOrder::RecentlyAdded {
-                card_list.set_sort(sort.get());
-            }
+            list.scroll_to_top();
             update_empty(&model, &status_page);
-            scrolled.vadjustment().set_value(0.0);
-        }
+        });
     }
 
     fn update_empty_state(&self) {
@@ -411,10 +405,42 @@ impl LibraryScreen {
     }
 }
 
+/// Build the drawer payload for the item under a long-press. Resolves title/art/
+/// kind from the model (or the synthetic Liked Songs row) plus its current pin
+/// state. Returns None if the id can't be resolved.
+fn build_library_item(
+    model: Option<&LibraryModel>,
+    pins: &PinnedStore,
+    id: &str,
+) -> Option<LibraryItem> {
+    // The Liked Songs row is synthetic; no library actions apply, so skip it.
+    if id.starts_with("__riff_liked") {
+        return None;
+    }
+    let card = model?.card_for(id)?;
+    Some(LibraryItem {
+        id: id.to_string(),
+        title: card.title(),
+        subtitle: card.subtitle(),
+        art: card.image(),
+        kind: card.card_kind(),
+        pinned: pins.is_pinned(id),
+    })
+}
+
 fn toggle_icon(layout: CardLayout) -> &'static str {
     match layout {
         CardLayout::Horizontal => "view-grid-symbolic",
         _ => "view-list-symbolic",
+    }
+}
+
+/// Arrow shown next to the sort label: down = descending, up = ascending.
+fn direction_icon(descending: bool) -> &'static str {
+    if descending {
+        "view-sort-descending-symbolic"
+    } else {
+        "view-sort-ascending-symbolic"
     }
 }
 
@@ -438,12 +464,10 @@ impl EventListener for LibraryScreen {
                 self.model.refresh_all();
             }
             AppEvent::LoginEvent(LoginEvent::LoginCompleted) => {
-                self.card_list.show_placeholders();
                 self.model.refresh_all();
             }
             AppEvent::LoginEvent(LoginEvent::LogoutCompleted) => {
                 self.model.clear_combined();
-                self.card_list.widget().remove_all();
                 self.status_page.set_visible(false);
             }
             AppEvent::BrowserEvent(
@@ -451,35 +475,23 @@ impl EventListener for LibraryScreen {
                 | BrowserEvent::SavedPlaylistsUpdated
                 | BrowserEvent::SavedArtistsUpdated,
             ) => {
-                self.card_list.remove_placeholders();
                 if self.model.filter() == LibraryFilter::All {
-                    // Append newly-arrived items to the combined store in place;
-                    // the CardList picks them up via items-changed (no rebind).
+                    // New items land in the sub-stores; fold them into the combined
+                    // store. items-changed then flows through the model chain, so no
+                    // view rebuild is needed.
                     self.model.reconcile_combined();
                 }
+                // The source store the view already points at is the live one, so we
+                // only need to (re)apply pins/positions and empty state.
+                self.list.sync_pins();
                 self.update_empty_state();
-                // Keep filling the viewport while there's more and no scrollbar.
-                let adj = self.scrolled_window.vadjustment();
-                if adj.upper() <= adj.page_size() && CardListModel::has_more(&*self.model) {
-                    self.card_list.append_placeholders();
-                    CardListModel::load_more(&*self.model);
-                }
-                let sort = self.current_sort.get();
-                if sort != SortOrder::RecentlyAdded {
-                    self.card_list.set_sort(sort);
-                }
             }
             AppEvent::BrowserEvent(BrowserEvent::CardLayoutChanged(_)) => {
-                self.card_list.update_layout(self.layout.get());
-                // Keep the library's own fixed size; don't inherit the global size change.
-                self.card_list.update_size(LIBRARY_CARD_SIZE);
-                self.apply_grid_columns();
-                self.toggle_button
-                    .set_icon_name(toggle_icon(self.layout.get()));
+                self.list.set_layout(self.layout.get());
             }
-            AppEvent::BrowserEvent(BrowserEvent::CardSizeChanged(_)) => {
-                // The Library screen ignores global card-size changes; its grid is
-                // always Small (100 px) so 3 columns fit the phone screen.
+            // A pin toggle from the long-press drawer: re-float the list.
+            AppEvent::LibraryPinsChanged => {
+                self.list.sync_pins();
             }
             _ => {}
         }
