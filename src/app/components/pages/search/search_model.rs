@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::ops::Deref;
 use std::rc::Rc;
 use std::time::Duration;
@@ -22,6 +23,9 @@ impl SearchResultsModel {
         }
     }
 
+    // Kept for parity with the other pages' models; the search screen is a bottom
+    // tab (no header/back button) so nothing calls this today.
+    #[allow(dead_code)]
     pub fn go_back(&self) {
         self.dispatcher
             .dispatch(BrowserAction::NavigationPop.into());
@@ -43,7 +47,9 @@ impl SearchResultsModel {
             let query = query.to_owned();
             self.dispatcher
                 .call_spotify_and_dispatch(move || async move {
-                    api.search(&query, 0, 5)
+                    // Fetch a fuller page per type: the redesigned search shows one
+                    // dense, unified list, so we want enough of each kind to fill it.
+                    api.search(&query, 0, 20)
                         .await
                         .map(|results| BrowserAction::SetSearchResults(Box::new(results)).into())
                 });
@@ -53,6 +59,28 @@ impl SearchResultsModel {
     pub fn get_results(&self) -> Option<impl Deref<Target = SearchResults> + '_> {
         self.app_model
             .map_state_opt(|s| Some(&s.browser.search_state()?.results))
+    }
+
+    /// Sets of ids that live in the logged-in user's own library, used to float
+    /// matching search results to the top (like Spotify). Returns
+    /// `(owned_playlist_ids, saved_album_ids, followed_artist_ids)`.
+    ///
+    /// - Owned playlists come from the authoritative login-state index
+    ///   (`playlist_ids`, populated from the user's own playlists).
+    /// - Saved albums / followed artists come from the home stores the Library
+    ///   screen already primes; if those haven't loaded yet the sets are simply
+    ///   empty (results still show, just unsorted for that type).
+    pub fn library_ids(&self) -> (HashSet<String>, HashSet<String>, HashSet<String>) {
+        let state = self.app_model.get_state();
+        let owned_playlists = state.logged_user.playlist_ids.clone();
+        let (saved_albums, followed_artists) = match state.browser.home_state() {
+            Some(home) => (
+                home.albums.iter().map(|c| c.id()).collect(),
+                home.artists.iter().map(|c| c.id()).collect(),
+            ),
+            None => (HashSet::new(), HashSet::new()),
+        };
+        (owned_playlists, saved_albums, followed_artists)
     }
     pub fn open_track(&self, song: SongDescription) {
         self.queued_song.borrow_mut().replace(song.clone());
