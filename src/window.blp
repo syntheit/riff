@@ -5,9 +5,13 @@ Adw.ApplicationWindow window {
   default-width: 1080;
   default-height: 720;
 
-  // Add-to-playlist overlay. Outermost sheet so it appears over everything
-  // including the player and queue. Opened programmatically via ShowAddToPlaylist.
-  Adw.BottomSheet add_to_playlist_sheet {
+  // Library long-press context drawer. Outermost sheet so it appears over
+  // everything. Opened programmatically via ShowLibraryItemMenu (GtkGestureLongPress
+  // on a library row/card).
+  Adw.BottomSheet library_menu_sheet {
+    modal: true;
+
+    content: Adw.BottomSheet add_to_playlist_sheet {
     modal: true;
 
     content: Adw.BottomSheet song_menu_sheet {
@@ -84,17 +88,17 @@ Adw.ApplicationWindow window {
           }
         }
 
-        // Menu button pinned top-left (interim: avoids overlap with per-page
-        // view/sort buttons that live top-right on card pages).
+        // Menu button pinned top-right (Spotify-style). Hidden on pushed detail
+        // pages by UserMenu's NavigationPushed/Popped handling.
         [overlay]
         MenuButton user {
           icon-name: "open-menu-symbolic";
           focus-on-click: false;
           can-focus: false;
-          halign: start;
+          halign: end;
           valign: start;
           margin-top: 4;
-          margin-start: 8;
+          margin-end: 8;
         }
       }
 
@@ -165,6 +169,13 @@ Adw.ApplicationWindow window {
       Adw.Bin add_to_playlist_host {
         vexpand: true;
       }
+    }
+    };
+
+    // The library context drawer. Content-sized (short list of actions); no fixed
+    // height-request — let the rows dictate the height (mirrors song_menu_host).
+    [sheet]
+    Adw.Bin library_menu_host {
     }
   }
 }

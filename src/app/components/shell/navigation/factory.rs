@@ -12,6 +12,7 @@ pub struct ScreenFactory {
     worker: Worker,
     shared_layout: Rc<Cell<CardLayout>>,
     shared_size: Rc<Cell<CardSize>>,
+    pins: PinnedStore,
 }
 
 impl ScreenFactory {
@@ -19,6 +20,7 @@ impl ScreenFactory {
         app_model: Rc<AppModel>,
         dispatcher: Box<dyn ActionDispatcher>,
         worker: Worker,
+        pins: PinnedStore,
     ) -> Self {
         let tracker = StateTracker::new_from_gsettings();
         Self {
@@ -27,6 +29,7 @@ impl ScreenFactory {
             worker,
             shared_layout: Rc::new(Cell::new(tracker.load_card_layout())),
             shared_size: Rc::new(Cell::new(tracker.load_card_size())),
+            pins,
         }
     }
 
@@ -65,6 +68,7 @@ impl ScreenFactory {
             Rc::clone(&self.shared_layout),
             Rc::clone(&self.shared_size),
             Rc::clone(&self.dispatcher),
+            self.pins.clone(),
         )
     }
 

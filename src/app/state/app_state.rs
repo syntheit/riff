@@ -41,6 +41,11 @@ pub enum AppAction {
     RemovePlaylist(String),
     ShowAddToPlaylist(crate::app::models::SongDescription),
     ShowSongMenu(crate::app::models::SongDescription),
+    /// Open the library long-press context drawer for the given item.
+    ShowLibraryItemMenu(crate::app::models::LibraryItem),
+    /// The local pin set changed (pin/unpin from the library drawer); the library
+    /// screen re-floats its list in response.
+    LibraryPinsChanged,
 }
 
 // Not actual actions, just neat wrappers
@@ -111,6 +116,8 @@ pub enum AppEvent {
     NowPlayingSheetShown,
     AddToPlaylistShown(crate::app::models::SongDescription),
     SongMenuShown(crate::app::models::SongDescription),
+    LibraryItemMenuShown(crate::app::models::LibraryItem),
+    LibraryPinsChanged,
     SearchTabShown,
     SettingsEvent(SettingsEvent),
 }
@@ -149,6 +156,8 @@ impl AppState {
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
             AppAction::ShowAddToPlaylist(song) => vec![AppEvent::AddToPlaylistShown(song)],
             AppAction::ShowSongMenu(song) => vec![AppEvent::SongMenuShown(song)],
+            AppAction::ShowLibraryItemMenu(item) => vec![AppEvent::LibraryItemMenuShown(item)],
+            AppAction::LibraryPinsChanged => vec![AppEvent::LibraryPinsChanged],
             AppAction::ShowSearchTab => vec![AppEvent::SearchTabShown],
             AppAction::Raise => vec![AppEvent::Raised],
             // Cross-state actions: multiple "substates" are affected by these actions, that's why they're handled here

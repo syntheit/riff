@@ -16,6 +16,20 @@ pub use card_model::*;
 
 use crate::app::components::card::IMAGE_SIZE;
 
+/// A plain (non-GObject) snapshot of a library item, carried by the
+/// `ShowLibraryItemMenu` action so the long-press drawer can render the item card
+/// and pick the right actions (unfollow artist vs unsave album/playlist) without
+/// re-reading the store. `kind` disambiguates the "Remove from library" action.
+#[derive(Clone, Debug)]
+pub struct LibraryItem {
+    pub id: String,
+    pub title: String,
+    pub subtitle: String,
+    pub art: Option<String>,
+    pub kind: CardKind,
+    pub pinned: bool,
+}
+
 impl From<&AlbumDescription> for CardModel {
     fn from(album: &AlbumDescription) -> Self {
         let art = album

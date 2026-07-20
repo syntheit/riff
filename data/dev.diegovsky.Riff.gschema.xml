@@ -284,5 +284,9 @@
       <default>'recently-added'</default>
       <summary>Sort order for the unified library page</summary>
     </key>
+    <key name="sort-library-descending" type="b">
+      <default>false</default>
+      <summary>Whether the unified library page sorts in descending order</summary>
+    </key>
   </schema>
 </schemalist>

@@ -22,6 +22,9 @@ pub use home::*;
 mod library;
 pub use library::*;
 
+mod library_menu;
+pub use library_menu::*;
+
 mod login;
 pub use login::*;
 

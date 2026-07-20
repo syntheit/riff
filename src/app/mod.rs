@@ -100,6 +100,11 @@ impl App {
             sender.unbounded_send(action).unwrap();
         }
 
+        // The local playlist/album/artist pin set, shared between the library screen
+        // (floats pinned items to the top) and the long-press context drawer
+        // (toggles pins). Loaded once from ~/.cache/riff/pinned.json.
+        let pins = components::PinnedStore::load();
+
         // All components that will be available initially
         let mut components: Vec<Box<dyn EventListener>> = vec![
             App::make_window(&self.settings, builder, Rc::clone(model)),
@@ -134,12 +139,20 @@ impl App {
                 dispatcher.box_clone(),
                 worker.clone(),
             ),
+            App::make_library_menu(
+                builder,
+                Rc::clone(model),
+                dispatcher.box_clone(),
+                worker.clone(),
+                pins.clone(),
+            ),
             App::make_login(builder, dispatcher.box_clone()),
             App::make_navigation(
                 builder,
                 Rc::clone(model),
                 dispatcher.box_clone(),
                 worker.clone(),
+                pins.clone(),
             ),
             App::make_user_menu(builder, Rc::clone(model), dispatcher),
             App::make_notification(builder),
@@ -193,17 +206,31 @@ impl App {
         app_model: Rc<AppModel>,
         dispatcher: Box<dyn ActionDispatcher>,
         worker: Worker,
+        pins: components::PinnedStore,
     ) -> Box<Navigation> {
         let root_nav: libadwaita::NavigationView = builder.object("root_nav").unwrap();
         let tab_stack: libadwaita::ViewStack = builder.object("tab_stack").unwrap();
         // This is where components that are not created initially will be assembled
-        let screen_factory = ScreenFactory::new(app_model, dispatcher.box_clone(), worker);
+        let screen_factory = ScreenFactory::new(app_model, dispatcher.box_clone(), worker, pins);
         Box::new(Navigation::new(
             root_nav,
             tab_stack,
             screen_factory,
             dispatcher,
         ))
+    }
+
+    fn make_library_menu(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
+        pins: components::PinnedStore,
+    ) -> Box<impl EventListener> {
+        let host: libadwaita::Bin = builder.object("library_menu_host").unwrap();
+        let sheet: gtk::Widget = builder.object("library_menu_sheet").unwrap();
+        let model = LibraryMenuModel::new(app_model, dispatcher, pins);
+        Box::new(LibraryMenu::new(model, host, sheet, worker))
     }
 
     fn make_login(builder: &gtk::Builder, dispatcher: Box<dyn ActionDispatcher>) -> Box<Login> {
