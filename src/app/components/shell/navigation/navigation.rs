@@ -120,18 +120,6 @@ impl Navigation {
         library_page.set_title(Some("Library"));
         library_page.set_icon_name(Some("library-music-symbolic"));
 
-        // Diagnostic: print the ACTUAL titles/icons the switcher will render for
-        // each tab, so a device run confirms the Library tab reads "Library".
-        // (Strip once verified on-device.)
-        for page in [&home_page, &search_page, &library_page] {
-            error!(
-                "TABDBG name={:?} title={:?} icon={:?}",
-                page.name(),
-                page.title(),
-                page.icon_name(),
-            );
-        }
-
         self.tab_stack.set_visible_child_name("home");
 
         // Tapping a bottom tab while a detail page is open returns to the tab shell.

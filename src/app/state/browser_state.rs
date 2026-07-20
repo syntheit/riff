@@ -415,6 +415,19 @@ impl UpdatableState for BrowserState {
             BrowserAction::ChangeSortOrder(page, order) => {
                 vec![BrowserEvent::SortOrderChanged(page.clone(), *order)]
             }
+            // Home-feed actions are owned exclusively by HomeState. Route them
+            // directly so they reach HomeState regardless of which screen is
+            // currently on top of the navigation stack.
+            BrowserAction::SetRecentlyPlayed(_, _)
+            | BrowserAction::SetTopArtists(_)
+            | BrowserAction::SetTopTracks(_)
+            | BrowserAction::SetMadeForYou(_, _) => {
+                if let Some(home) = self.home_state_mut() {
+                    home.update_with(Cow::Borrowed(action_ref))
+                } else {
+                    vec![]
+                }
+            }
             // Besides navigation actions, we just forward actions to each dedicated reducer
             _ => self
                 .navigation

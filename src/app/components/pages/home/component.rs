@@ -205,6 +205,15 @@ impl HomeScreen {
 
     /// Empty and refill a single shelf from its store, hiding it when empty.
     fn rebuild_shelf(&self, shelf: Shelf) {
+        let shelf_name = match shelf {
+            Shelf::JumpBackIn => "jump_back_in",
+            Shelf::RecentlyPlayed => "recently_played",
+            Shelf::TopArtists => "top_artists",
+            Shelf::TopTracks => "top_tracks",
+            Shelf::MadeForYou => "made_for_you",
+            Shelf::Library => "library",
+        };
+
         let Some((_, section)) = self.sections.iter().find(|(s, _)| *s == shelf) else {
             return;
         };
@@ -216,6 +225,7 @@ impl HomeScreen {
         }
 
         let Some(state) = self.model.state() else {
+            eprintln!("RIFF_HOME: rebuild_shelf '{}' -> no state, hiding", shelf_name);
             section.set_visible(false);
             return;
         };
@@ -236,6 +246,13 @@ impl HomeScreen {
                 header.set_label(&made_for_you_title(&seed));
             }
         }
+
+        eprintln!(
+            "RIFF_HOME: rebuild_shelf '{}' -> {} cards, visible={}",
+            shelf_name,
+            cards.len(),
+            !cards.is_empty()
+        );
 
         if cards.is_empty() {
             section.set_visible(false);
@@ -321,26 +338,32 @@ impl EventListener for HomeScreen {
     fn on_event(&mut self, event: &AppEvent) {
         match event {
             AppEvent::Started => {
+                eprintln!("RIFF_HOME: on_event Started -> calling refresh_feed");
                 self.model.refresh_feed();
             }
             AppEvent::LoginEvent(LoginEvent::LoginCompleted) => {
+                eprintln!("RIFF_HOME: on_event LoginCompleted -> calling refresh_feed");
                 self.model.refresh_feed();
             }
             AppEvent::LoginEvent(LoginEvent::LogoutCompleted) => {
                 self.rebuild_all();
             }
             AppEvent::BrowserEvent(BrowserEvent::RecentlyPlayedUpdated) => {
+                eprintln!("RIFF_HOME: on_event RecentlyPlayedUpdated -> rebuild");
                 self.rebuild_shortcuts();
                 self.rebuild_shelf(Shelf::JumpBackIn);
                 self.rebuild_shelf(Shelf::RecentlyPlayed);
             }
             AppEvent::BrowserEvent(BrowserEvent::TopArtistsUpdated) => {
+                eprintln!("RIFF_HOME: on_event TopArtistsUpdated -> rebuild");
                 self.rebuild_shelf(Shelf::TopArtists);
             }
             AppEvent::BrowserEvent(BrowserEvent::TopTracksUpdated) => {
+                eprintln!("RIFF_HOME: on_event TopTracksUpdated -> rebuild");
                 self.rebuild_shelf(Shelf::TopTracks);
             }
             AppEvent::BrowserEvent(BrowserEvent::MadeForYouUpdated) => {
+                eprintln!("RIFF_HOME: on_event MadeForYouUpdated -> rebuild");
                 self.rebuild_shelf(Shelf::MadeForYou);
             }
             AppEvent::BrowserEvent(BrowserEvent::LibraryUpdated) => {
