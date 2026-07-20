@@ -258,7 +258,12 @@ pub struct Album {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct AlbumInfo {
+    // `label` and `copyrights` can be absent in some API responses (dev-mode
+    // apps, re-issued albums); default them so a missing field doesn't fail
+    // deserialization and silently blank the album detail page.
+    #[serde(default)]
     pub label: String,
+    #[serde(default)]
     pub copyrights: Vec<Copyright>,
     pub total_tracks: u32,
 }
