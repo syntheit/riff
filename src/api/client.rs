@@ -233,7 +233,6 @@ impl SpotifyClient {
     where
         B: Into<isahc::AsyncBody>,
     {
-        let dbg_uri = request.uri().clone();
         let mut result = self.client.send_async(request).await?;
 
         let etag = result
@@ -262,16 +261,13 @@ impl SpotifyClient {
                 max_age: cache_control.unwrap_or(10),
                 etag,
             }),
-            s => {
-                error!("APIDBG {} -> {}", dbg_uri, s.as_u16());
-                Err(SpotifyApiError::BadStatus(
-                    s.as_u16(),
-                    result
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| "(no details available)".to_string()),
-                ))
-            }
+            s => Err(SpotifyApiError::BadStatus(
+                s.as_u16(),
+                result
+                    .text()
+                    .await
+                    .unwrap_or_else(|_| "(no details available)".to_string()),
+            )),
         }
     }
 
@@ -311,7 +307,6 @@ impl SpotifyClient {
     ) -> SpotifyRequest<'_, (), Page<Album>> {
         let query = make_query_params()
             .append_pair("include_groups", "album,single")
-            .append_pair("country", "from_token")
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])
             .finish();
@@ -322,13 +317,9 @@ impl SpotifyClient {
     }
 
     pub(crate) fn get_artist_top_tracks(&self, id: &str) -> SpotifyRequest<'_, (), TopTracks> {
-        let query = make_query_params()
-            .append_pair("market", "from_token")
-            .finish();
-
         self.request()
             .method(Method::GET)
-            .uri(format!("/v1/artists/{id}/top-tracks"), Some(&query))
+            .uri(format!("/v1/artists/{id}/top-tracks"), None)
     }
 
     pub(crate) fn recently_played(&self, limit: usize) -> SpotifyRequest<'_, (), RecentlyPlayed> {
@@ -427,7 +418,6 @@ impl SpotifyClient {
 
     pub(crate) fn get_playlist(&self, id: &str) -> SpotifyRequest<'_, (), Playlist> {
         let query = make_query_params()
-            .append_pair("market", "from_token")
             // why still grab the tracks field?
             // the model still expects the appearance of a tracks field
             .append_pair("fields", "id,name,images,owner,snapshot_id,tracks(total)")
@@ -444,7 +434,6 @@ impl SpotifyClient {
         limit: usize,
     ) -> SpotifyRequest<'_, (), Page<PlaylistTrack>> {
         let query = make_query_params()
-            .append_pair("market", "from_token")
             .append_pair("offset", &offset.to_string()[..])
             .append_pair("limit", &limit.to_string()[..])
             .finish();
