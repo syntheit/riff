@@ -305,6 +305,7 @@ impl SpotifyClient {
         offset: usize,
         limit: usize,
     ) -> SpotifyRequest<'_, (), Page<Album>> {
+        let limit = limit.clamp(1, 50);
         let query = make_query_params()
             .append_pair("include_groups", "album,single")
             .append_pair("market", "US")
@@ -312,6 +313,7 @@ impl SpotifyClient {
             .append_pair("limit", &limit.to_string()[..])
             .finish();
 
+        eprintln!("RIFF_HOME: get_artist_albums query = {}", query);
         self.request()
             .method(Method::GET)
             .uri(format!("/v1/artists/{id}/albums"), Some(&query))

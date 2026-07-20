@@ -215,9 +215,11 @@ impl HomeScreen {
         };
 
         let Some((_, section)) = self.sections.iter().find(|(s, _)| *s == shelf) else {
+            eprintln!("RIFF_HOME: rebuild_shelf '{}' -> section NOT FOUND", shelf_name);
             return;
         };
         let Some(strip) = shelf_strip(section) else {
+            eprintln!("RIFF_HOME: rebuild_shelf '{}' -> strip NOT FOUND (tree mismatch)", shelf_name);
             return;
         };
         while let Some(child) = strip.first_child() {
@@ -323,9 +325,20 @@ fn shelf_header(section: &gtk::Box) -> Option<gtk::Label> {
 }
 
 /// The horizontal card strip inside a shelf section (child of its scroller).
+///
+/// GTK4's ScrolledWindow always wraps its set_child() target in a GtkViewport,
+/// so `scroller.child()` returns a Viewport, not the Box we set.  We handle
+/// both cases (Viewport-wrapped and bare Box) so this is robust against any
+/// future GTK version that might change the wrapping behaviour.
 fn shelf_strip(section: &gtk::Box) -> Option<gtk::Box> {
     let scroller = section.last_child().and_downcast::<gtk::ScrolledWindow>()?;
-    scroller.child().and_downcast::<gtk::Box>()
+    let child = scroller.child()?;
+    // GTK4 wraps the child in a GtkViewport; descend through it.
+    if let Some(viewport) = child.downcast_ref::<gtk::Viewport>() {
+        viewport.child().and_downcast::<gtk::Box>()
+    } else {
+        child.downcast::<gtk::Box>().ok()
+    }
 }
 
 impl Component for HomeScreen {
