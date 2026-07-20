@@ -154,7 +154,7 @@ impl App {
                 worker.clone(),
                 pins.clone(),
             ),
-            App::make_user_menu(builder, Rc::clone(model), dispatcher),
+            App::make_user_menu(builder, Rc::clone(model), dispatcher, worker.clone()),
             App::make_notification(builder),
         ];
 
@@ -337,12 +337,13 @@ impl App {
         builder: &gtk::Builder,
         app_model: Rc<AppModel>,
         dispatcher: Box<dyn ActionDispatcher>,
+        worker: Worker,
     ) -> Box<UserMenu> {
         let parent: gtk::Window = builder.object("window").unwrap();
         let button: gtk::MenuButton = builder.object("user").unwrap();
         let about: libadwaita::AboutDialog = builder.object("about").unwrap();
         let model = UserMenuModel::new(app_model, dispatcher.box_clone());
-        let user_menu = UserMenu::new(button, about, parent, model, dispatcher);
+        let user_menu = UserMenu::new(button, about, parent, model, dispatcher, worker);
         Box::new(user_menu)
     }
 

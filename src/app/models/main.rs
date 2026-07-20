@@ -94,6 +94,16 @@ pub struct UserRef {
     pub display_name: String,
 }
 
+/// The logged-in user's own profile essentials (`/me`), kept lightweight: the
+/// display name for the menu header and the avatar image URL for the top-right
+/// profile button. `image_url` is None when the account has no profile picture.
+#[derive(Clone, Debug)]
+pub struct CurrentUser {
+    pub id: String,
+    pub display_name: String,
+    pub image_url: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ArtistRef {
     pub id: String,

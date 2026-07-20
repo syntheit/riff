@@ -73,10 +73,28 @@ impl SearchQuery {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Page<T> {
+    // Spotify occasionally returns `null` entries inside an items list (e.g. an
+    // unavailable/region-locked saved playlist or a delisted track). A plain
+    // `Vec<T>` would fail to deserialize on the first null ("invalid type: null,
+    // expected struct …"), taking the whole page down. Deserialize each element as
+    // an `Option<T>` and drop the `None`s so one bad item never blows up the list.
+    #[serde(default, deserialize_with = "deserialize_nullable_items")]
     items: Option<Vec<T>>,
     offset: Option<usize>,
     limit: Option<usize>,
     total: usize,
+}
+
+/// Deserialize an `items` array that may contain `null` elements, dropping the
+/// nulls. Used by every `Page<T>` so a single null entry from Spotify doesn't fail
+/// the whole page. A missing/`null` array itself deserializes to `None`.
+fn deserialize_nullable_items<'de, D, T>(deserializer: D) -> Result<Option<Vec<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    let maybe: Option<Vec<Option<T>>> = Option::deserialize(deserializer)?;
+    Ok(maybe.map(|items| items.into_iter().flatten().collect()))
 }
 
 impl<T> Page<T> {
@@ -151,6 +169,8 @@ pub struct Cursors {
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct CursorPage<T> {
+    // Same null-item tolerance as `Page<T>` (see `deserialize_nullable_items`).
+    #[serde(default, deserialize_with = "deserialize_nullable_items")]
     pub items: Option<Vec<T>>,
     pub cursors: Option<Cursors>,
     #[allow(dead_code)] // Part of the Spotify API response but currently unused
@@ -816,6 +836,31 @@ mod tests {
         let deserialized: Playlist = serde_json::from_str(json).unwrap();
         assert!(deserialized.tracks.is_some());
         assert_eq!(deserialized.tracks.as_ref().unwrap().total(), 42);
+    }
+
+    #[test]
+    fn test_saved_playlists_page_skips_null_items() {
+        // Spotify can return a `null` entry in a saved-playlists list (an
+        // unavailable/region-locked playlist). The page must parse and simply drop
+        // the null rather than failing the whole deserialization.
+        let json = r#"{"items":[{"id":"pl1","name":"A","images":null,"owner":{"id":"u","display_name":"U"},"snapshot_id":"s","tracks":{"total":10}},null,{"id":"pl2","name":"B","images":null,"owner":{"id":"u","display_name":"U"},"snapshot_id":"s","tracks":{"total":20}}],"offset":0,"limit":50,"total":3}"#;
+        let parsed: Page<Playlist> = serde_json::from_str(json).unwrap();
+        let playlists: Vec<Playlist> = parsed.into_iter().collect();
+        assert_eq!(playlists.len(), 2);
+        assert_eq!(playlists[0].id, "pl1");
+        assert_eq!(playlists[1].id, "pl2");
+    }
+
+    #[test]
+    fn test_saved_playlists_track_total_populated() {
+        // The library "Largest" sort relies on tracks.total flowing through to the
+        // PlaylistDescription's batch total. /me/playlists returns tracks as a
+        // paging object with only `total` (no items) — that must still yield the
+        // count.
+        let json = r#"{"id":"pl1","name":"My List","images":null,"owner":{"id":"u","display_name":"U"},"snapshot_id":"s","tracks":{"total":37,"limit":100,"offset":0}}"#;
+        let deserialized: Playlist = serde_json::from_str(json).unwrap();
+        let desc = PlaylistDescription::from(deserialized);
+        assert_eq!(desc.songs.batch.total, 37);
     }
 
     #[test]
