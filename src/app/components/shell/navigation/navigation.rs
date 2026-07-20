@@ -75,7 +75,7 @@ impl Navigation {
         if !self.tab_roots.is_empty() {
             return;
         }
-        let home = Box::new(self.screen_factory.make_library());
+        let home = Box::new(self.screen_factory.make_home());
         let search = Box::new(self.screen_factory.make_search_results());
         let library = Box::new(self.screen_factory.make_library_screen());
 

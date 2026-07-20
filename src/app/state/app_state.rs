@@ -296,6 +296,12 @@ impl AppState {
                     home.albums.replace_all(std::iter::empty());
                     home.playlists.replace_all(std::iter::empty());
                     home.saved_tracks.clear().commit();
+                    home.recently_played.replace_all(std::iter::empty());
+                    home.jump_back_in.replace_all(std::iter::empty());
+                    home.top_artists.replace_all(std::iter::empty());
+                    home.top_tracks.replace_all(std::iter::empty());
+                    home.made_for_you.replace_all(std::iter::empty());
+                    home.made_for_you_seed = None;
                 }
                 events.extend(forward_action(
                     BrowserAction::NavigationPopTo(ScreenName::Home),

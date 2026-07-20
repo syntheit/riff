@@ -327,6 +327,40 @@ impl SpotifyClient {
             .uri(format!("/v1/artists/{id}/top-tracks"), Some(&query))
     }
 
+    pub(crate) fn recently_played(&self, limit: usize) -> SpotifyRequest<'_, (), RecentlyPlayed> {
+        let query = make_query_params()
+            .append_pair("limit", &limit.to_string()[..])
+            .finish();
+
+        self.request()
+            .method(Method::GET)
+            .uri("/v1/me/player/recently-played".to_string(), Some(&query))
+    }
+
+    pub(crate) fn get_top_artists(&self, limit: usize) -> SpotifyRequest<'_, (), Page<Artist>> {
+        let query = make_query_params()
+            .append_pair("time_range", "medium_term")
+            .append_pair("limit", &limit.to_string()[..])
+            .finish();
+
+        self.request()
+            .method(Method::GET)
+            .uri("/v1/me/top/artists".to_string(), Some(&query))
+    }
+
+    // `/me/top/tracks` is a paged `{items:[…]}` list — distinct from the
+    // artist-scoped `TopTracks` (`{tracks:[…]}`) used by `get_artist_top_tracks`.
+    pub(crate) fn get_top_tracks(&self, limit: usize) -> SpotifyRequest<'_, (), Page<TrackItem>> {
+        let query = make_query_params()
+            .append_pair("time_range", "medium_term")
+            .append_pair("limit", &limit.to_string()[..])
+            .finish();
+
+        self.request()
+            .method(Method::GET)
+            .uri("/v1/me/top/tracks".to_string(), Some(&query))
+    }
+
     pub(crate) fn is_album_saved(&self, id: &str) -> SpotifyRequest<'_, (), Vec<bool>> {
         let query = make_query_params().append_pair("ids", id).finish();
         self.request()

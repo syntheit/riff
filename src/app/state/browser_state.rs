@@ -55,6 +55,10 @@ pub enum BrowserAction {
     RemoveSavedTracks(Vec<String>),
     SetSavedArtists(Vec<ArtistSummary>, Option<String>),
     AppendSavedArtists(Vec<ArtistSummary>, Option<String>),
+    SetRecentlyPlayed(Vec<SongDescription>, Vec<JumpBackContext>),
+    SetTopArtists(Vec<ArtistSummary>),
+    SetTopTracks(Vec<SongDescription>),
+    SetMadeForYou(String, Vec<AlbumDescription>),
     FollowArtist(String),
     UnfollowArtist(String),
     SavePlaylist(String),
@@ -100,6 +104,10 @@ pub enum BrowserEvent {
     UserDetailsUpdated(String),
     SavedTracksUpdated,
     SavedArtistsUpdated,
+    RecentlyPlayedUpdated,
+    TopArtistsUpdated,
+    TopTracksUpdated,
+    MadeForYouUpdated,
 }
 
 impl From<BrowserEvent> for AppEvent {

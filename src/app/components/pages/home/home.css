@@ -1,0 +1,33 @@
+.home-title {
+  font-size: 1.7rem;
+  font-weight: 800;
+}
+
+/* Filter chips: accent-filled when checked, muted otherwise. */
+.home-chip {
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+.home-chip:checked {
+  background-color: @accent_bg_color;
+  color: @accent_fg_color;
+}
+
+.home-shelf-title {
+  font-size: 1.15rem;
+  font-weight: 700;
+}
+
+/* Bleed the strip a touch past the right margin so the next card peeks,
+   signalling "swipe for more" the way Spotify's edge-bleeding rows do. */
+.home-shelf-strip {
+  padding-right: 24px;
+}
+
+/* Cards sit in flat buttons so taps get a subtle press state without a frame. */
+.home-card-button {
+  padding: 0;
+  background: none;
+  box-shadow: none;
+}

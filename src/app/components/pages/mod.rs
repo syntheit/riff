@@ -16,6 +16,9 @@ pub use details_user::*;
 mod queue;
 pub use queue::*;
 
+mod home;
+pub use home::*;
+
 mod library;
 pub use library::*;
 

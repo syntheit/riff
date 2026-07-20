@@ -270,6 +270,15 @@ pub struct HomeState {
     pub saved_tracks: SongListModel,
     pub artists: ListStore<CardModel>,
     pub artists_cursor: Option<String>,
+    // Personal home-feed shelves. Driven by the home feed model; the Library
+    // screen ignores these (it only reads albums/playlists/artists above).
+    pub recently_played: ListStore<CardModel>,
+    pub jump_back_in: ListStore<CardModel>,
+    pub top_artists: ListStore<CardModel>,
+    pub top_tracks: ListStore<CardModel>,
+    pub made_for_you: ListStore<CardModel>,
+    /// Seed artist name for the "Because you listen to <artist>" shelf title.
+    pub made_for_you_seed: Option<String>,
 }
 
 impl Default for HomeState {
@@ -285,6 +294,12 @@ impl Default for HomeState {
             saved_tracks: SongListModel::new(50),
             artists: ListStore::new(),
             artists_cursor: Some(String::new()),
+            recently_played: ListStore::new(),
+            jump_back_in: ListStore::new(),
+            top_artists: ListStore::new(),
+            top_tracks: ListStore::new(),
+            made_for_you: ListStore::new(),
+            made_for_you_seed: None,
         }
     }
 }
@@ -425,6 +440,29 @@ impl UpdatableState for HomeState {
                 self.artists.extend(artists.iter().map(|a| a.into()));
                 self.artists_cursor = cursor.clone();
                 vec![BrowserEvent::SavedArtistsUpdated]
+            }
+            BrowserAction::SetRecentlyPlayed(songs, contexts) => {
+                self.recently_played
+                    .replace_all(songs.iter().map(song_album_card));
+                self.jump_back_in
+                    .replace_all(contexts.iter().map(|c| c.into()));
+                vec![BrowserEvent::RecentlyPlayedUpdated]
+            }
+            BrowserAction::SetTopArtists(artists) => {
+                self.top_artists
+                    .replace_all(artists.iter().map(|a| a.into()));
+                vec![BrowserEvent::TopArtistsUpdated]
+            }
+            BrowserAction::SetTopTracks(songs) => {
+                self.top_tracks
+                    .replace_all(songs.iter().map(song_album_card));
+                vec![BrowserEvent::TopTracksUpdated]
+            }
+            BrowserAction::SetMadeForYou(seed, albums) => {
+                self.made_for_you
+                    .replace_all(albums.iter().map(|a| a.into()));
+                self.made_for_you_seed = Some(seed.clone());
+                vec![BrowserEvent::MadeForYouUpdated]
             }
             _ => vec![],
         }
