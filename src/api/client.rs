@@ -233,6 +233,10 @@ impl SpotifyClient {
     where
         B: Into<isahc::AsyncBody>,
     {
+        // Capture method + URI up front so a failing request can be identified in
+        // the logs (the request itself is consumed by send_async). e.g.
+        // "GET /v1/albums/{id}?...".
+        let request_desc = describe_request(&request);
         let mut result = self.client.send_async(request).await?;
 
         let etag = result
@@ -263,10 +267,13 @@ impl SpotifyClient {
             }),
             s => Err(SpotifyApiError::BadStatus(
                 s.as_u16(),
-                result
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "(no details available)".to_string()),
+                format!(
+                    "{request_desc}: {}",
+                    result
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "(no details available)".to_string())
+                ),
             )),
         }
     }
@@ -275,6 +282,7 @@ impl SpotifyClient {
     where
         B: Into<isahc::AsyncBody>,
     {
+        let request_desc = describe_request(&request);
         let mut result = self.client.send_async(request).await?;
         match result.status() {
             StatusCode::UNAUTHORIZED => Err(SpotifyApiError::InvalidToken),
@@ -283,13 +291,30 @@ impl SpotifyClient {
             s if s.is_success() => Ok(()),
             s => Err(SpotifyApiError::BadStatus(
                 s.as_u16(),
-                result
-                    .text()
-                    .await
-                    .unwrap_or_else(|_| "(no details available)".to_string()),
+                format!(
+                    "{request_desc}: {}",
+                    result
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "(no details available)".to_string())
+                ),
             )),
         }
     }
+}
+
+/// Render an outgoing request as "METHOD path?query" for error/log context, so a
+/// failing status (e.g. a 403 on album open) reveals exactly which endpoint
+/// failed. The request body is consumed when sent, so this must be called before
+/// `send_async`.
+fn describe_request<B>(request: &Request<B>) -> String {
+    let method = request.method();
+    let path_and_query = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or_else(|| request.uri().path());
+    format!("{method} {path_and_query}")
 }
 
 impl SpotifyClient {
