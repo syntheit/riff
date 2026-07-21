@@ -191,6 +191,7 @@ impl RiffOauthClient {
     }
 
     pub async fn refresh_token(&self, old_token: Credentials) -> Result<Credentials, OAuthError> {
+        let old_refresh_token = old_token.refresh_token.clone();
         let Ok(token) = self
             .client
             .exchange_refresh_token(&RefreshToken::new(old_token.refresh_token))
@@ -211,9 +212,8 @@ impl RiffOauthClient {
 
         let refresh_token = token
             .refresh_token()
-            .ok_or(OAuthError::NoRefreshToken)?
-            .secret()
-            .to_string();
+            .map(|rt| rt.secret().to_string())
+            .unwrap_or(old_refresh_token);
 
         let new_token = Credentials {
             access_token: token.access_token().secret().to_string(),
