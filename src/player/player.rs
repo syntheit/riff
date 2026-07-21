@@ -336,39 +336,48 @@ impl SpotifyPlayer {
                     .ok_or(SpotifyError::PlayerNotReady)?
                     .clone();
 
-                // Resolve the station's track ids AND hydrate their metadata
-                // entirely through the librespot session. The Web API path is dead
-                // for this dev-mode app: /v1/recommendations 404s, and both the
-                // editorial station playlist and /v1/tracks?ids= 403. librespot's
-                // internal endpoints use the account's full streaming access, so
-                // they work where the Web API refuses.
+                // Resolve the station into concrete tracks entirely through the
+                // librespot session. The Web API path is dead for this dev-mode
+                // app: /v1/recommendations 404s, and both the editorial station
+                // playlist and /v1/tracks?ids= 403. librespot's internal endpoints
+                // use the account's full streaming access, so they work where the
+                // Web API refuses.
+                //
+                // FAST PATH (issue #2): the apollo station response already carries
+                // per-track metadata (title/artist/album/art), so we build the
+                // `SongDescription`s straight from that JSON — a single request, no
+                // 51× `Track::get` round-trips, making radio near-instant. Only the
+                // fallback (get_context / apollo without metadata) still hydrates
+                // ids via the metadata API.
                 let seed_id_for_hydrate = seed_id.clone();
-                let radio_ids = resolve_radio_track_ids(&session, &seed_id).await;
+                let mut radio_songs = resolve_radio_songs(&session, &seed_id).await;
                 eprintln!(
-                    "RIFF_RADIO: resolved {} radio track id(s) for seed {}",
-                    radio_ids.len(),
+                    "RIFF_RADIO: resolved {} radio song(s) for seed {}",
+                    radio_songs.len(),
                     seed_id
                 );
 
-                // Hydrate seed first, then the station tracks (dedup keeps the seed
-                // from repeating). Metadata comes from the internal metadata API.
-                let mut ids: Vec<String> = Vec::with_capacity(radio_ids.len() + 1);
-                ids.push(seed_id_for_hydrate.clone());
-                for id in radio_ids {
-                    if id != seed_id_for_hydrate {
-                        ids.push(id);
-                    }
-                }
+                // Ensure the seed track leads the station and carries correct
+                // metadata/art (used as the page cover). The apollo response may or
+                // may not include the seed; hydrate it directly (1 metadata call)
+                // and prepend it, then drop any later duplicate of the seed id.
+                let seed_song = hydrate_single_song(&session, &seed_id_for_hydrate).await;
 
-                let songs = hydrate_radio_songs(&session, &ids).await;
-                eprintln!("RIFF_RADIO: hydrated {} radio song(s)", songs.len());
+                let mut songs: Vec<SongDescription> =
+                    Vec::with_capacity(radio_songs.len() + 1);
+                if let Some(seed) = seed_song {
+                    songs.push(seed);
+                }
+                radio_songs.retain(|s| s.id != seed_id_for_hydrate);
+                songs.append(&mut radio_songs);
 
                 if songs.is_empty() {
-                    // Nothing hydrated at all (even the seed failed): surface a
+                    // Nothing resolved at all (even the seed failed): surface a
                     // gentle error rather than silently doing nothing.
                     return Err(SpotifyError::TechnicalError);
                 }
 
+                eprintln!("RIFF_RADIO: station has {} song(s)", songs.len());
                 self.delegate.radio_resolved(seed_id, songs);
                 Ok(())
             }
@@ -741,26 +750,27 @@ async fn player_setup_delegate(mut channel: PlayerEventChannel, delegate: AppPla
     }
 }
 
-/// Resolve a "song radio" station into a concrete list of base62 track ids,
-/// entirely through the librespot session (no Web API).
+/// Resolve a "song radio" station into concrete `SongDescription`s, entirely
+/// through the librespot session (no Web API). The seed is NOT prepended here —
+/// the caller hydrates + prepends the seed and dedups.
 ///
 /// Strategy, in order:
 ///  1. `get_apollo_station("tracks", "spotify:track:{seed}", …)` — the
-///     `/radio-apollo/v3/tracks/{ctx}` endpoint. librespot documents scopes
-///     "tracks"/"stations" as working, and this is the endpoint the desktop
-///     "Go to radio"/station contexts use. We walk the JSON for `spotify:track:`
-///     uris.
+///     `/radio-apollo/v3/tracks/{ctx}` endpoint. The response already carries a
+///     per-track `metadata` block (title / artist_name / artist_uri /
+///     album_title / image_url), so we build `SongDescription`s DIRECTLY from
+///     the JSON: one request, no per-track metadata round-trips. This is the
+///     fast path that makes radio near-instant (issue #2).
 ///  2. If scope "tracks" yields nothing, retry with scope "stations".
-///  3. If the apollo response still contains no track uris but *does* reference a
-///     playlist/station/album context uri (the same way `get_radio_for_track`
-///     was observed to return only `spotify:playlist:37i9…`), resolve that
-///     context into tracks via `spclient().get_context(uri)` (typed `Context`
-///     protobuf, internal API — works where the Web API 403s) and walk its pages.
+///  3. If the apollo response carries track uris but NO usable metadata, fall
+///     back to hydrating those ids via `Track::get`.
+///  4. If the apollo response has no track uris at all but *does* reference a
+///     playlist/station/album context uri, resolve that context into ids via
+///     `spclient().get_context(uri)` and hydrate them via `Track::get`.
 ///
-/// The seed id is NOT filtered here (the caller prepends the seed and dedups).
 /// The raw response head is logged (RIFF_RADIO) so the on-device schema can be
 /// confirmed and this can be tightened later.
-async fn resolve_radio_track_ids(session: &Session, seed_id: &str) -> Vec<String> {
+async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescription> {
     let context_uri = format!("spotify:track:{seed_id}");
 
     // (1)/(2): try the apollo station endpoint, scope "tracks" then "stations".
@@ -786,25 +796,43 @@ async fn resolve_radio_track_ids(session: &Session, seed_id: &str) -> Vec<String
                     }
                 };
 
-                // (a) direct track uris in the station payload
+                // (a) FAST PATH: build songs straight from the per-track metadata
+                // in the apollo payload (no Track::get).
+                let songs = songs_from_apollo_json(&value);
+                if !songs.is_empty() {
+                    eprintln!(
+                        "RIFF_RADIO: apollo scope={scope} built {} song(s) from JSON metadata",
+                        songs.len()
+                    );
+                    return songs;
+                }
+
+                // (b) apollo had track uris but no usable metadata: hydrate ids.
                 let ids = collect_uri_ids(&value, "spotify:track:");
                 if !ids.is_empty() {
                     eprintln!(
-                        "RIFF_RADIO: apollo scope={scope} yielded {} track uri(s)",
+                        "RIFF_RADIO: apollo scope={scope} yielded {} track uri(s) w/o metadata; hydrating",
                         ids.len()
                     );
-                    return ids;
+                    let songs = hydrate_radio_songs(session, &ids).await;
+                    if !songs.is_empty() {
+                        return songs;
+                    }
                 }
 
-                // (b) apollo returned only a context uri (playlist/station/album);
-                // resolve that context into tracks via the internal resolver.
+                // (c) apollo returned only a context uri (playlist/station/album);
+                // resolve that context into ids via the internal resolver, then
+                // hydrate.
                 if let Some(ctx_uri) = first_context_uri(&value) {
                     eprintln!(
                         "RIFF_RADIO: apollo scope={scope} returned context uri {ctx_uri}; resolving via get_context"
                     );
                     let ids = resolve_context_track_ids(session, &ctx_uri).await;
                     if !ids.is_empty() {
-                        return ids;
+                        let songs = hydrate_radio_songs(session, &ids).await;
+                        if !songs.is_empty() {
+                            return songs;
+                        }
                     }
                 }
             }
@@ -814,8 +842,127 @@ async fn resolve_radio_track_ids(session: &Session, seed_id: &str) -> Vec<String
         }
     }
 
-    eprintln!("RIFF_RADIO: no radio track ids resolved for seed {seed_id}");
+    eprintln!("RIFF_RADIO: no radio songs resolved for seed {seed_id}");
     Vec::new()
+}
+
+/// Build `SongDescription`s directly from the apollo station JSON's per-track
+/// `metadata` blocks — the fast path (issue #2). Each station track looks like:
+///
+/// ```json
+/// { "uri": "spotify:track:{id}",
+///   "metadata": {
+///     "title": "...", "artist_name": "...", "artist_uri": "spotify:artist:{id}",
+///     "album_title": "...", "image_url": "spotify:image:{hex}" } }
+/// ```
+///
+/// The image uri (`spotify:image:{hex}`) maps to the CDN url
+/// `https://i.scdn.co/image/{hex}`, the same shape riff's ImageLoader fetches.
+/// Tracks are walked in document order and de-duplicated by id. Any track
+/// missing a usable `spotify:track:` uri or a title is skipped; if none survive
+/// (e.g. the payload has no per-track metadata) the caller falls back to id
+/// hydration.
+fn songs_from_apollo_json(value: &serde_json::Value) -> Vec<SongDescription> {
+    let mut songs: Vec<SongDescription> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // The track array lives under a top-level key (observed: `tracks`); be
+    // tolerant and search any array of objects whose items carry a
+    // `spotify:track:` uri + a `metadata` object.
+    fn walk(
+        value: &serde_json::Value,
+        songs: &mut Vec<SongDescription>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        match value {
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    if let Some(song) = song_from_apollo_track(v) {
+                        if seen.insert(song.id.clone()) {
+                            songs.push(song);
+                        }
+                    } else {
+                        walk(v, songs, seen);
+                    }
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    walk(v, songs, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    walk(value, &mut songs, &mut seen);
+    songs
+}
+
+/// Try to build one `SongDescription` from a single apollo station track object.
+/// Returns `None` when the object isn't a track (no `spotify:track:` uri) or
+/// lacks a title — signalling the caller to keep walking / fall back.
+fn song_from_apollo_track(v: &serde_json::Value) -> Option<SongDescription> {
+    let obj = v.as_object()?;
+    let uri = obj.get("uri")?.as_str()?;
+    let id = uri.strip_prefix("spotify:track:")?;
+    let id = id.split(':').next().unwrap_or(id);
+    if id.is_empty() {
+        return None;
+    }
+
+    let meta = obj.get("metadata").and_then(|m| m.as_object())?;
+    let title = meta.get("title").and_then(|t| t.as_str())?;
+    if title.is_empty() {
+        return None;
+    }
+
+    let artist_name = meta
+        .get("artist_name")
+        .and_then(|a| a.as_str())
+        .unwrap_or_default();
+    let artist_id = meta
+        .get("artist_uri")
+        .and_then(|a| a.as_str())
+        .and_then(|u| u.strip_prefix("spotify:artist:"))
+        .map(|s| s.split(':').next().unwrap_or(s).to_string())
+        .unwrap_or_default();
+    let album_title = meta
+        .get("album_title")
+        .and_then(|a| a.as_str())
+        .unwrap_or_default();
+
+    // `spotify:image:{hex}` -> `https://i.scdn.co/image/{hex}`.
+    let art = meta
+        .get("image_url")
+        .and_then(|i| i.as_str())
+        .and_then(|u| u.strip_prefix("spotify:image:"))
+        .filter(|hex| !hex.is_empty())
+        .and_then(|hex| {
+            ImageSet::from_images(std::iter::once((
+                None,
+                format!("https://i.scdn.co/image/{hex}"),
+            )))
+        });
+
+    Some(SongDescription {
+        id: id.to_string(),
+        track_number: None,
+        uri: uri.to_string(),
+        title: title.to_string(),
+        artists: vec![ArtistRef {
+            id: artist_id,
+            name: artist_name.to_string(),
+        }],
+        album: AlbumRef {
+            id: String::new(),
+            name: album_title.to_string(),
+        },
+        // Apollo metadata doesn't include duration; 0 renders as "0:00" and the
+        // real duration is filled in by the player once the track loads.
+        duration_ms: 0,
+        art,
+    })
 }
 
 /// Resolve a context uri (playlist/station/album/…) into base62 track ids using
@@ -857,28 +1004,43 @@ async fn resolve_context_track_ids(session: &Session, context_uri: &str) -> Vec<
     }
 }
 
+/// Hydrate full metadata for a single base62 track id via librespot's internal
+/// metadata API (`Track::get`). Used for the seed track (always fetched so the
+/// station cover + header are correct) and by the fallback batch hydrator.
+async fn hydrate_single_song(session: &Session, id: &str) -> Option<SongDescription> {
+    let spotify_id = match SpotifyId::from_base62(id) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("RIFF_RADIO: bad track id {id}: {e}");
+            return None;
+        }
+    };
+    let uri = SpotifyUri::Track { id: spotify_id };
+    match Track::get(session, &uri).await {
+        Ok(track) => match song_from_track(&track) {
+            Some(song) => Some(song),
+            None => {
+                eprintln!("RIFF_RADIO: could not build SongDescription for {id}");
+                None
+            }
+        },
+        Err(e) => {
+            eprintln!("RIFF_RADIO: metadata fetch failed for {id}: {e}");
+            None
+        }
+    }
+}
+
 /// Hydrate full metadata for a list of base62 track ids via librespot's internal
 /// metadata API (`Track::get`), converting each into a riff `SongDescription`.
 /// Order is preserved. Tracks that fail to parse/fetch are skipped (logged).
+/// Only used on the fallback paths — the apollo fast path builds songs straight
+/// from JSON without any per-track fetch.
 async fn hydrate_radio_songs(session: &Session, ids: &[String]) -> Vec<SongDescription> {
     let mut songs = Vec::with_capacity(ids.len());
     for id in ids {
-        let spotify_id = match SpotifyId::from_base62(id) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("RIFF_RADIO: bad track id {id}: {e}");
-                continue;
-            }
-        };
-        let uri = SpotifyUri::Track { id: spotify_id };
-        match Track::get(session, &uri).await {
-            Ok(track) => match song_from_track(&track) {
-                Some(song) => songs.push(song),
-                None => eprintln!("RIFF_RADIO: could not build SongDescription for {id}"),
-            },
-            Err(e) => {
-                eprintln!("RIFF_RADIO: metadata fetch failed for {id}: {e}");
-            }
+        if let Some(song) = hydrate_single_song(session, id).await {
+            songs.push(song);
         }
     }
     songs

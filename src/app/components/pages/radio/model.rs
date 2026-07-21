@@ -10,7 +10,7 @@ use gettextrs::gettext;
 use std::ops::Deref;
 use std::rc::Rc;
 
-use crate::{impl_playlist_model_base, impl_toggle_play};
+use crate::impl_toggle_play;
 
 use crate::app::components::DetailsPageModel;
 use crate::app::components::{
@@ -58,6 +58,17 @@ impl RadioModel {
             seed_name: self.seed_name.clone(),
         }
     }
+
+    /// True when the current playback source is *this* radio station. Used to
+    /// gate the song-row "now playing" highlight so it only lights up once the
+    /// user actually plays a track from this station (not when the same track id
+    /// happens to be playing from another context).
+    fn is_current_source(&self) -> bool {
+        matches!(
+            self.app_model.get_state().playback.current_source(),
+            Some(SongsSource::Radio { seed_id, .. }) if seed_id == &self.id
+        )
+    }
 }
 
 impl PageModel for RadioModel {
@@ -78,6 +89,15 @@ impl PageModel for RadioModel {
 
     fn get_caption(&self) -> Option<String> {
         Some(gettext("Radio"))
+    }
+
+    fn get_artwork(&self) -> Option<ImageSet> {
+        // Use the seed track's album art as the station cover (the player thread
+        // puts the seed first, and its id matches the station id). Falls back to
+        // the first available track, then to the broadcast `default_icon`.
+        let songs = PlaylistModel::song_list_model(self);
+        let seed = songs.get(&self.id).or_else(|| songs.index(0))?;
+        seed.description().art.clone()
     }
 
     fn header_image_shape(&self) -> HeaderImageShape {
@@ -101,10 +121,7 @@ impl PageModel for RadioModel {
     }
 
     fn source_is_playing(&self) -> bool {
-        matches!(
-            self.app_model.get_state().playback.current_source(),
-            Some(SongsSource::Radio { seed_id, .. }) if seed_id == &self.id
-        )
+        self.is_current_source()
     }
 
     impl_toggle_play!();
@@ -132,7 +149,42 @@ impl PlaylistModel for RadioModel {
         true
     }
 
-    impl_playlist_model_base!();
+    // Base delegations (mirrors `impl_playlist_model_base!`), EXCEPT
+    // `current_song_id`, which is made source-aware below so the row highlight
+    // only lights up when playback is actually from this radio station.
+    fn is_paused(&self) -> bool {
+        self.base.is_paused()
+    }
+
+    /// Source-aware "currently playing" id. Returns the playing track id ONLY
+    /// when the active playback source is this radio station; otherwise `None`,
+    /// so no row is highlighted (even if the same track id is playing from a
+    /// different context). This is what gates issue #1 — opening the station no
+    /// longer falsely highlights the seed track.
+    fn current_song_id(&self) -> Option<String> {
+        if self.is_current_source() {
+            self.base.current_song_id()
+        } else {
+            None
+        }
+    }
+
+    fn select_song(&self, id: &str) {
+        self.select_song_from_list(&PlaylistModel::song_list_model(self), id);
+    }
+    fn deselect_song(&self, id: &str) {
+        self.base.deselect_song(id);
+    }
+    fn selection(&self) -> Option<Box<dyn Deref<Target = SelectionState> + '_>> {
+        self.base.selection()
+    }
+    fn is_song_liked(&self, id: &str) -> bool {
+        self.base.is_song_liked(id)
+    }
+    fn toggle_song_like(&self, id: &str) {
+        let songs = PlaylistModel::song_list_model(self);
+        self.base.toggle_song_like(&songs, id);
+    }
 
     fn enable_selection(&self) -> bool {
         self.enable_selection_with_context(SelectionContext::Default)

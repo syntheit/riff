@@ -140,6 +140,10 @@ impl NowPlayingSheetModel {
 
         // Fall back to the (title-cased-ish) type label when the name is unknown.
         let name = name.unwrap_or_else(|| type_label.clone());
+        // Temporary on-device confirmation of source-header resolution (issue #4).
+        eprintln!(
+            "RIFF_SRC: source_display -> type={type_label:?} name={name:?} source={source:?}"
+        );
         Some((type_label, name))
     }
 
@@ -303,10 +307,15 @@ impl NowPlayingSheet {
     // hiding it when there's no navigable source.
     fn update_source(&self) {
         match self.model.source_display() {
-            Some((type_label, name)) => self
-                .widget
-                .set_source(Some((type_label.as_str(), name.as_str()))),
-            None => self.widget.set_source(None),
+            Some((type_label, name)) => {
+                eprintln!("RIFF_SRC: update_source SHOW type={type_label:?} name={name:?}");
+                self.widget
+                    .set_source(Some((type_label.as_str(), name.as_str())))
+            }
+            None => {
+                eprintln!("RIFF_SRC: update_source HIDE (no navigable source)");
+                self.widget.set_source(None)
+            }
         }
     }
 

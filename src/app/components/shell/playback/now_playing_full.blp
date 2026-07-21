@@ -5,7 +5,12 @@ template $NowPlayingFullWidget : Adw.Bin {
   Adw.ToolbarView {
     [top]
     Adw.HeaderBar {
-      show-title: false;
+      // NOTE: do NOT set `show-title: false` here — Adw.HeaderBar hides its
+      // custom [title] widget when show-title is false, which suppressed the
+      // "PLAYING FROM <source>" header entirely. The header's own
+      // `source_button.visible` (driven from NowPlayingSheet) controls when it
+      // shows, so the title slot must remain enabled.
+      show-title: true;
 
       Button close_button {
         icon-name: "go-down-symbolic";
