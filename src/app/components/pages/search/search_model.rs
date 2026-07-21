@@ -61,6 +61,25 @@ impl SearchResultsModel {
             .map_state_opt(|s| Some(&s.browser.search_state()?.results))
     }
 
+    /// The current search query (empty string when there is none). Used to drive
+    /// the *local* owned-playlist matching, which runs independently of the API
+    /// round-trip so a partial query still surfaces a matching own playlist.
+    pub fn current_query(&self) -> String {
+        self.app_model
+            .get_state()
+            .browser
+            .search_state()
+            .map(|s| s.query.clone())
+            .unwrap_or_default()
+    }
+
+    /// The logged-in user's own playlists as full descriptions (name + cover +
+    /// id), loaded on login. Cloned so the caller can read them synchronously
+    /// without holding a borrow on the app state.
+    pub fn owned_playlists(&self) -> Vec<PlaylistDescription> {
+        self.app_model.get_state().logged_user.owned_playlists.clone()
+    }
+
     /// Sets of ids that live in the logged-in user's own library, used to float
     /// matching search results to the top (like Spotify). Returns
     /// `(owned_playlist_ids, saved_album_ids, followed_artist_ids)`.
