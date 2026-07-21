@@ -41,6 +41,17 @@ pub enum AppAction {
     RemovePlaylist(String),
     ShowAddToPlaylist(crate::app::models::SongDescription),
     ShowSongMenu(crate::app::models::SongDescription),
+    /// Start a "song radio" station seeded from a track (base62 id). Resolved
+    /// asynchronously by the librespot player (Web API /recommendations is dead),
+    /// which reports back via `StartRadioResolved`.
+    StartRadio(String),
+    /// The player resolved a radio station: `seed_id` is the seed track and
+    /// `track_ids` are the similar tracks. Metadata is hydrated (Web API) and the
+    /// station is loaded into playback, replacing the current queue.
+    StartRadioResolved {
+        seed_id: String,
+        track_ids: Vec<String>,
+    },
     /// Open the library long-press context drawer for the given item.
     ShowLibraryItemMenu(crate::app::models::LibraryItem),
     /// The local pin set changed (pin/unpin from the library drawer); the library
@@ -116,6 +127,14 @@ pub enum AppEvent {
     NowPlayingSheetShown,
     AddToPlaylistShown(crate::app::models::SongDescription),
     SongMenuShown(crate::app::models::SongDescription),
+    /// A radio station was requested for the given seed track (base62 id); the
+    /// player should resolve it via librespot.
+    RadioRequested(String),
+    /// The player resolved a radio station; hydrate metadata and load the queue.
+    RadioResolved {
+        seed_id: String,
+        track_ids: Vec<String>,
+    },
     LibraryItemMenuShown(crate::app::models::LibraryItem),
     LibraryPinsChanged,
     SearchTabShown,
@@ -156,6 +175,14 @@ impl AppState {
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
             AppAction::ShowAddToPlaylist(song) => vec![AppEvent::AddToPlaylistShown(song)],
             AppAction::ShowSongMenu(song) => vec![AppEvent::SongMenuShown(song)],
+            AppAction::StartRadio(seed_id) => vec![AppEvent::RadioRequested(seed_id)],
+            AppAction::StartRadioResolved {
+                seed_id,
+                track_ids,
+            } => vec![AppEvent::RadioResolved {
+                seed_id,
+                track_ids,
+            }],
             AppAction::ShowLibraryItemMenu(item) => vec![AppEvent::LibraryItemMenuShown(item)],
             AppAction::LibraryPinsChanged => vec![AppEvent::LibraryPinsChanged],
             AppAction::ShowSearchTab => vec![AppEvent::SearchTabShown],

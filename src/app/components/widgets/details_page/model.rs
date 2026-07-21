@@ -334,6 +334,7 @@ mod tests {
         stub_api_method!(recently_played(_limit: usize) -> (Vec<SongDescription>, Vec<JumpBackContext>));
         stub_api_method!(get_top_artists(_limit: usize) -> Vec<ArtistSummary>);
         stub_api_method!(get_top_tracks(_limit: usize) -> Vec<SongDescription>);
+        stub_api_method!(get_tracks(_ids: Vec<String>) -> Vec<SongDescription>);
         stub_api_method!(follow_artist(_id: &str) -> ());
         stub_api_method!(unfollow_artist(_id: &str) -> ());
         stub_api_method!(get_playlist_track_ids(_id: &str) -> Vec<String>);

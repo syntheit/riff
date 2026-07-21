@@ -427,6 +427,22 @@ pub struct TopTracks {
     pub tracks: Vec<TrackItem>,
 }
 
+// Response wrapper for `GET /v1/tracks?ids=…`: `{ "tracks": [Track | null, …] }`.
+// Unlike artist top-tracks, this batch endpoint returns `null` in-place for any
+// unavailable/relinked-out id, so items must be null-tolerant (a plain
+// `Vec<TrackItem>` would fail to deserialize on the first null).
+#[derive(Deserialize, Debug, Clone)]
+pub struct Tracks {
+    #[serde(default, deserialize_with = "deserialize_nullable_items")]
+    pub tracks: Option<Vec<TrackItem>>,
+}
+
+impl From<Tracks> for Vec<SongDescription> {
+    fn from(tracks: Tracks) -> Self {
+        Page::new(tracks.tracks.unwrap_or_default()).into()
+    }
+}
+
 // `/me/player/recently-played` returns a cursor-paged list of play-history
 // objects (a track plus when and in what context it was played).
 #[derive(Deserialize, Debug, Clone)]

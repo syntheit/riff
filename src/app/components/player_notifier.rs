@@ -280,6 +280,13 @@ impl EventListener for PlayerNotifier {
         let device = self.device().clone();
         match (device, event) {
             (_, AppEvent::LoginEvent(event)) => self.notify_login(event),
+            // Song radio always resolves through the local librespot session (it
+            // owns the internal radio endpoint), regardless of the active device.
+            (_, AppEvent::RadioRequested(seed_id)) => {
+                self.send_command_to_local_player(Command::StartRadio {
+                    seed_id: seed_id.clone(),
+                });
+            }
             (_, AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(d))) => self.switch_device(d),
             (Device::Local, AppEvent::PlaybackEvent(event)) => self.notify_local_player(event),
             (Device::Local, AppEvent::SettingsEvent(SettingsEvent::PlayerSettingsChanged)) => {

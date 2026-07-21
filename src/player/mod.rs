@@ -24,6 +24,10 @@ pub enum Command {
     PlayerSeek(u32),
     PlayerSetVolume(f64),
     PlayerPreload(SpotifyUri),
+    // Resolve a "song radio" station seeded from a track (base62 id) via the
+    // librespot session's internal radio endpoint, then report the resulting
+    // track ids back to the app for metadata hydration + queue loading.
+    StartRadio { seed_id: String },
     ReloadSettings,
     SetEqualizer { bands: [f64; 10] },
     SetMono { enabled: bool },
@@ -47,6 +51,16 @@ impl AppPlayerDelegate {
 
     fn end_of_track_reached(&self) {
         self.send(PlaybackAction::Next.into())
+    }
+
+    // Report a resolved radio station back to the app: the seed track id plus the
+    // similar-track ids returned by the librespot radio endpoint. The app then
+    // hydrates metadata (Web API /v1/tracks) and loads the queue.
+    fn radio_resolved(&self, seed_id: String, track_ids: Vec<String>) {
+        self.send(AppAction::StartRadioResolved {
+            seed_id,
+            track_ids,
+        })
     }
 
     fn token_login_successful(&self, username: String) {

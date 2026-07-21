@@ -353,6 +353,21 @@ impl SpotifyClient {
             .uri(format!("/v1/artists/{id}/top-tracks"), None)
     }
 
+    // Batch track lookup: GET /v1/tracks?ids=a,b,c. Returns `{ "tracks": [Track…] }`,
+    // which the existing `TopTracks` model already matches. Used to hydrate radio
+    // station track ids into full `SongDescription`s. Spotify caps this batch at
+    // 50 ids per call; callers must chunk. (Unlike /v1/recommendations, this is a
+    // live endpoint for dev-mode apps.)
+    pub(crate) fn get_tracks(&self, ids: &[String]) -> SpotifyRequest<'_, (), Tracks> {
+        // Commas must be literal in the `ids` param; `form_urlencoded` would encode
+        // them as %2C, so join manually (base62 ids are URL-safe).
+        let ids = ids.join(",");
+        let query = format!("ids={ids}");
+        self.request()
+            .method(Method::GET)
+            .uri("/v1/tracks".to_string(), Some(&query))
+    }
+
     pub(crate) fn recently_played(&self, limit: usize) -> SpotifyRequest<'_, (), RecentlyPlayed> {
         let limit = limit.clamp(1, 50);
         let query = make_query_params()

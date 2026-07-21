@@ -56,6 +56,47 @@ impl SongMenuModel {
                     .map(|_| AppAction::BrowserAction(BrowserAction::RemoveSavedTracks(vec![id])))
             });
     }
+
+    // Hydrate a resolved radio station (seed + similar track ids) into full song
+    // metadata via the Web API, then load it as the playback queue and start on
+    // the seed. Replaces the current queue/context, matching Spotify's "Start
+    // radio". Runs on the GLib worker (Web API), off the player thread that did
+    // the resolve.
+    // `PlaybackAction::LoadSongs` is deprecated but remains the correct path for a
+    // flat, non-paged station list (it replaces the queue and emits SourceChanged).
+    #[allow(deprecated)]
+    fn load_radio(&self, seed_id: String, track_ids: Vec<String>) {
+        let api = self.app_model.get_spotify();
+        // Seed plays first, then the similar tracks (order preserved by get_tracks).
+        let mut ids = Vec::with_capacity(track_ids.len() + 1);
+        ids.push(seed_id.clone());
+        ids.extend(track_ids);
+
+        self.dispatcher
+            .call_spotify_and_dispatch_many(move || async move {
+                let songs = api.get_tracks(ids).await?;
+                eprintln!("RIFF_RADIO: hydrated {} radio track(s)", songs.len());
+                if songs.is_empty() {
+                    return Ok(vec![AppAction::ShowNotification(gettext(
+                        // translators: shown when a song radio station could not be built.
+                        "Could not start radio for this song.",
+                    ))]);
+                }
+                // The first song to play: prefer the seed if it hydrated, else the
+                // first available track.
+                let first_id = songs
+                    .iter()
+                    .find(|s| s.id == seed_id)
+                    .map(|s| s.id.clone())
+                    .unwrap_or_else(|| songs[0].id.clone());
+                Ok(vec![
+                    // Replace the queue with the whole station...
+                    AppAction::PlaybackAction(PlaybackAction::LoadSongs(songs)),
+                    // ...then start playback on the seed track.
+                    AppAction::PlaybackAction(PlaybackAction::Load(first_id)),
+                ])
+            });
+    }
 }
 
 pub struct SongMenu {
@@ -145,6 +186,22 @@ impl SongMenu {
                 model_q
                     .dispatcher
                     .dispatch(PlaybackAction::Queue(vec![song_q.clone()]).into());
+            },
+        ));
+
+        // Start radio — build a station seeded from this song and start playing it,
+        // replacing the current queue (like Spotify's "Start radio").
+        let sheet = self.sheet.clone();
+        let model_r = self.model.clone();
+        let seed_id = song.id.clone();
+        actions_box.append(&action_row(
+            "emblem-shared-symbolic",
+            &gettext("Start radio"),
+            move || {
+                set_sheet_open(&sheet, false);
+                model_r
+                    .dispatcher
+                    .dispatch(AppAction::StartRadio(seed_id.clone()));
             },
         ));
 
@@ -328,6 +385,12 @@ impl EventListener for SongMenu {
                         self.build_for(&song);
                     }
                 }
+            }
+            AppEvent::RadioResolved {
+                seed_id,
+                track_ids,
+            } => {
+                self.model.load_radio(seed_id.clone(), track_ids.clone());
             }
             _ => {}
         }

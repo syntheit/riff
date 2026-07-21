@@ -157,6 +157,11 @@ pub trait SpotifyApiClient {
 
     fn get_top_tracks(&self, limit: usize) -> BoxFuture<SpotifyResult<Vec<SongDescription>>>;
 
+    /// Fetch full metadata for a batch of track ids via `GET /v1/tracks?ids=…`.
+    /// Order is preserved and unavailable ids are dropped. Ids beyond the Spotify
+    /// 50-per-call batch limit are chunked across multiple requests.
+    fn get_tracks(&self, ids: Vec<String>) -> BoxFuture<SpotifyResult<Vec<SongDescription>>>;
+
     fn follow_artist(&self, id: &str) -> BoxFuture<SpotifyResult<()>>;
 
     fn unfollow_artist(&self, id: &str) -> BoxFuture<SpotifyResult<()>>;
@@ -1102,6 +1107,25 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .await?;
 
             Ok(page.into())
+        })
+    }
+
+    fn get_tracks(&self, ids: Vec<String>) -> BoxFuture<SpotifyResult<Vec<SongDescription>>> {
+        Box::pin(async move {
+            let mut songs: Vec<SongDescription> = Vec::with_capacity(ids.len());
+            // Spotify caps /v1/tracks at 50 ids per request; chunk to stay under.
+            for chunk in ids.chunks(50) {
+                let tracks: Tracks = self
+                    .client
+                    .get_tracks(chunk)
+                    .send()
+                    .await?
+                    .deserialize()
+                    .ok_or(SpotifyApiError::NoContent)?;
+                let batch: Vec<SongDescription> = tracks.into();
+                songs.extend(batch);
+            }
+            Ok(songs)
         })
     }
 

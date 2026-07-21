@@ -5,6 +5,8 @@ use librespot::core::authentication::Credentials;
 use librespot::core::cache::Cache;
 use librespot::core::config::SessionConfig;
 use librespot::core::session::Session;
+use librespot::core::spotify_id::SpotifyId;
+use librespot::core::SpotifyUri;
 
 use librespot::playback::mixer::softmixer::SoftMixer;
 use librespot::playback::mixer::{Mixer, MixerConfig};
@@ -325,6 +327,34 @@ impl SpotifyPlayer {
             Command::PlayerPreload(track) => {
                 self.get_player_mut()?.preload(track);
                 Ok(())
+            }
+            Command::StartRadio { seed_id } => {
+                let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
+                let track_id =
+                    SpotifyId::from_base62(&seed_id).map_err(|_| SpotifyError::TechnicalError)?;
+                let seed_uri = SpotifyUri::Track { id: track_id };
+
+                // Song Radio via librespot's internal endpoint
+                // (/inspiredby-mix/v2/seed_to_playlist). The Web API
+                // /v1/recommendations is dead (404) for this dev-mode app, so this
+                // is the only working path. Returns raw JSON we parse for track uris.
+                match session.spclient().get_radio_for_track(&seed_uri).await {
+                    Ok(bytes) => {
+                        let track_ids = parse_radio_track_ids(&bytes, &seed_id);
+                        eprintln!(
+                            "RIFF_RADIO: resolved {} radio track(s) for seed {}",
+                            track_ids.len(),
+                            seed_id
+                        );
+                        // Even with 0 similar tracks, still report so the seed plays.
+                        self.delegate.radio_resolved(seed_id, track_ids);
+                        Ok(())
+                    }
+                    Err(e) => {
+                        eprintln!("RIFF_RADIO: get_radio_for_track failed: {e}");
+                        Err(SpotifyError::TechnicalError)
+                    }
+                }
             }
             Command::RefreshToken => {
                 let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
@@ -692,6 +722,72 @@ async fn player_setup_delegate(mut channel: PlayerEventChannel, delegate: AppPla
             }
             _ => {}
         }
+    }
+}
+
+/// Extract track base62 ids from a `get_radio_for_track` JSON response.
+///
+/// The exact schema of the `/inspiredby-mix/v2/seed_to_playlist` payload is
+/// undocumented (no in-tree consumer in librespot), so rather than pinning a
+/// brittle struct we walk the whole JSON tree and pull the base62 id out of any
+/// `spotify:track:{id}` URI string we find, in document order, de-duplicated. The
+/// seed itself is dropped (it is prepended separately when the queue is built).
+/// A raw response is logged once on-device (RIFF_RADIO) so the schema can be
+/// confirmed and this can be tightened later if desired.
+fn parse_radio_track_ids(bytes: &[u8], seed_id: &str) -> Vec<String> {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(v) => v,
+        Err(e) => {
+            let preview: String = String::from_utf8_lossy(bytes).chars().take(500).collect();
+            eprintln!("RIFF_RADIO: failed to parse radio JSON ({e}); raw head: {preview}");
+            return Vec::new();
+        }
+    };
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    collect_track_ids(&value, seed_id, &mut ids, &mut seen);
+
+    if ids.is_empty() {
+        // Nothing matched the expected shape: dump a bounded preview so the real
+        // schema can be inspected on-device.
+        let preview: String = String::from_utf8_lossy(bytes).chars().take(800).collect();
+        eprintln!("RIFF_RADIO: no track uris found in radio response; raw head: {preview}");
+    }
+
+    ids
+}
+
+/// Recursively walk a JSON value collecting base62 ids from `spotify:track:{id}`
+/// URI strings (in any `uri`/`link`/string position). Skips the seed and dupes.
+fn collect_track_ids(
+    value: &serde_json::Value,
+    seed_id: &str,
+    ids: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(id) = s.strip_prefix("spotify:track:") {
+                // Guard against `spotify:track:{id}:...` variants by taking the id
+                // segment only.
+                let id = id.split(':').next().unwrap_or(id);
+                if !id.is_empty() && id != seed_id && seen.insert(id.to_string()) {
+                    ids.push(id.to_string());
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for v in arr {
+                collect_track_ids(v, seed_id, ids, seen);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                collect_track_ids(v, seed_id, ids, seen);
+            }
+        }
+        _ => {}
     }
 }
 
