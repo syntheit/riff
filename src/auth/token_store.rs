@@ -125,6 +125,13 @@ impl TokenStore {
         self.0.storage.write().unwrap().replace(creds);
     }
 
+    /// Populate only the in-process cache, without writing to the Secret
+    /// Service. Used to make the Web API usable immediately after a refresh
+    /// while deferring the keyring persist behind a gate (e.g. premium check).
+    pub fn set_cached(&self, creds: Credentials) {
+        self.0.storage.write().unwrap().replace(creds);
+    }
+
     pub async fn clear(&self) {
         if let Err(e) = self.logout().await {
             warn!("Couldnt save token to secrets service: {e}");

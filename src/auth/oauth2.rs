@@ -166,6 +166,21 @@ impl RiffOauthClient {
         self.token_store.set(creds.clone()).await;
     }
 
+    /// Populate only the in-process token cache (no keyring write). This makes
+    /// the Web API immediately usable with the given credentials while leaving
+    /// the persisted keyring copy untouched.
+    pub fn cache_credentials(&self, creds: &Credentials) {
+        self.token_store.set_cached(creds.clone());
+    }
+
+    /// Force a token refresh from the currently cached credentials, returning
+    /// the freshly minted credentials. Used to recover when a probe against the
+    /// Web API is rejected (401) even though the cached token appeared valid.
+    pub async fn force_refresh(&self) -> Result<Credentials, OAuthError> {
+        let token = self.token_store.get().await.ok_or(OAuthError::LoggedOut)?;
+        self.refresh_token(token).await
+    }
+
     pub async fn get_valid_token(&self) -> Result<Credentials, OAuthError> {
         let token = self.token_store.get().await.ok_or(OAuthError::LoggedOut)?;
         if token.token_expired() {

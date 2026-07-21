@@ -418,21 +418,69 @@ impl SpotifyPlayer {
 
     async fn initial_login(
         &mut self,
-        credentials: credentials::Credentials,
+        mut credentials: credentials::Credentials,
     ) -> Result<(), SpotifyError> {
+        // Make the given (already-refreshed, by get_valid_token) credentials
+        // usable by the Web API *immediately*, before we probe premium status or
+        // touch librespot. This is in-memory only: we defer the keyring persist
+        // until premium is confirmed (see save_credentials below) so a genuine
+        // non-premium account is not saved and retried on next launch — but the
+        // running session can still make Web API calls regardless.
+        self.oauth_client.cache_credentials(&credentials);
+
         // Check if the account is premium before connecting to librespot.
         // librespot will crash the process for free accounts, so we must
         // catch this early and report a graceful error instead.
-        let is_premium = crate::api::check_premium(&credentials.access_token)
-            .await
-            .unwrap_or(false);
-        if !is_premium {
-            warn!("Account is not premium, aborting login");
-            return Err(SpotifyError::LoginFailed);
+        //
+        // Crucially, a *failed* probe (e.g. a 401 from an expired/revoked probe
+        // token, or a network error) must NOT be treated as "not premium":
+        // doing so would wrongly abort login for a genuine premium account on
+        // every relaunch. We only abort when /me actually succeeds and reports a
+        // non-premium account.
+        let mut status = crate::api::check_premium(&credentials.access_token).await;
+
+        // If the probe could not be completed, the access token we probed with
+        // may be stale despite looking valid (clock skew, server-side
+        // revocation just before expiry, etc.). Force one refresh and re-probe
+        // with the fresh token before drawing any conclusion.
+        if let crate::api::PremiumStatus::ProbeFailed(e) = &status {
+            warn!("Premium probe failed ({e}); forcing a token refresh and retrying");
+            match self.oauth_client.force_refresh().await {
+                Ok(refreshed) => {
+                    credentials = refreshed;
+                    self.oauth_client.cache_credentials(&credentials);
+                    status = crate::api::check_premium(&credentials.access_token).await;
+                }
+                Err(e) => {
+                    // A genuine refresh failure means we are really logged out
+                    // (the refresh token was rejected). force_refresh/refresh_token
+                    // already cleared the store in that case.
+                    warn!("Token refresh failed during login: {e}");
+                    return Err(SpotifyError::LoggedOut);
+                }
+            }
         }
 
-        // Only persist credentials to the keyring after confirming premium status.
-        // This prevents non-premium accounts from being saved and retried on next launch.
+        match status {
+            crate::api::PremiumStatus::NotPremium => {
+                // /me succeeded and genuinely reports a non-premium account.
+                warn!("Account is not premium, aborting login");
+                return Err(SpotifyError::LoginFailed);
+            }
+            crate::api::PremiumStatus::ProbeFailed(e) => {
+                // Still couldn't confirm premium status even after a refresh.
+                // Do NOT conclude "not premium" and do NOT wipe the refresh
+                // token — this is a transient/technical failure. The in-memory
+                // token is populated, so surface a technical error and let the
+                // user retry rather than forcing a re-login.
+                warn!("Could not confirm premium status after refresh: {e}");
+                return Err(SpotifyError::TechnicalError);
+            }
+            crate::api::PremiumStatus::Premium => {}
+        }
+
+        // Premium confirmed: now it is safe to persist the (possibly refreshed)
+        // credentials to the keyring for the next launch.
         self.oauth_client.save_credentials(&credentials).await;
 
         let creds = Credentials::with_access_token(&credentials.access_token);
