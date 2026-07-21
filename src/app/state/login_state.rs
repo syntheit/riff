@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 use url::Url;
 
-use crate::app::models::PlaylistSummary;
+use crate::app::models::{PlaylistDescription, PlaylistSummary, SongBatch, UserRef};
 use crate::app::state::{AppAction, AppEvent, UpdatableState};
 
 #[derive(Clone, Debug)]
@@ -26,7 +26,11 @@ pub enum LoginAction {
         display_name: String,
         image_url: Option<String>,
     },
-    SetUserPlaylists(Vec<PlaylistSummary>),
+    /// The user's own playlists as full descriptions (name + cover art + id),
+    /// fetched on login. The reducer derives the lightweight `playlists`/
+    /// `playlist_ids` indices from these and keeps the full list for the search
+    /// screen's local owned-playlist matching (which needs covers to render).
+    SetUserPlaylists(Vec<PlaylistDescription>),
     UpdateUserPlaylist(PlaylistSummary),
     PrependUserPlaylist(Vec<PlaylistSummary>),
     RemoveUserPlaylist(String),
@@ -81,6 +85,10 @@ pub struct LoginState {
     pub playlists: Vec<PlaylistSummary>,
     // Playlist IDs for O(1) ownership checks
     pub playlist_ids: HashSet<String>,
+    // Full descriptions of the user's own playlists (name + cover + id), kept so
+    // the search screen can locally match & render owned playlists (with covers)
+    // even for 1-2 char queries the Spotify API doesn't return them for.
+    pub owned_playlists: Vec<PlaylistDescription>,
 }
 
 impl UpdatableState for LoginState {
@@ -126,21 +134,48 @@ impl UpdatableState for LoginState {
                 self.user = None;
                 self.user_display_name = None;
                 self.user_image_url = None;
+                self.playlists.clear();
+                self.playlist_ids.clear();
+                self.owned_playlists.clear();
                 vec![LoginEvent::LogoutCompleted.into()]
             }
             LoginAction::SetUserPlaylists(playlists) => {
                 self.playlist_ids = playlists.iter().map(|p| p.id.clone()).collect();
-                self.playlists = playlists;
+                self.playlists = playlists.iter().cloned().map(Into::into).collect();
+                self.owned_playlists = playlists;
                 vec![LoginEvent::UserPlaylistsLoaded.into()]
             }
             LoginAction::UpdateUserPlaylist(PlaylistSummary { id, title }) => {
                 if let Some(p) = self.playlists.iter_mut().find(|p| p.id == id) {
+                    p.title = title.clone();
+                }
+                if let Some(p) = self.owned_playlists.iter_mut().find(|p| p.id == id) {
                     p.title = title;
                 }
                 vec![LoginEvent::UserPlaylistsLoaded.into()]
             }
             LoginAction::PrependUserPlaylist(mut summaries) => {
+                // A just-created playlist arrives as a summary (id + title, no cover).
+                // Keep the owned-playlists list in sync — with a cover-less synthetic
+                // description — so it's locally searchable immediately, before the next
+                // login refresh replaces it with the full (art-bearing) description.
                 for s in &summaries {
+                    if !self.playlist_ids.contains(&s.id) {
+                        self.owned_playlists.insert(
+                            0,
+                            PlaylistDescription {
+                                id: s.id.clone(),
+                                title: s.title.clone(),
+                                art: None,
+                                songs: SongBatch::empty(),
+                                owner: UserRef {
+                                    id: String::new(),
+                                    display_name: String::new(),
+                                },
+                                snapshot_id: None,
+                            },
+                        );
+                    }
                     self.playlist_ids.insert(s.id.clone());
                 }
                 summaries.append(&mut self.playlists);
@@ -149,6 +184,7 @@ impl UpdatableState for LoginState {
             }
             LoginAction::RemoveUserPlaylist(id) => {
                 self.playlists.retain(|p| p.id != id);
+                self.owned_playlists.retain(|p| p.id != id);
                 self.playlist_ids.remove(&id);
                 vec![LoginEvent::UserPlaylistsLoaded.into()]
             }

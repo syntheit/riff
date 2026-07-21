@@ -75,10 +75,13 @@ impl UserMenuModel {
         if self.username().is_some() {
             self.dispatcher
                 .call_spotify_and_dispatch(move || async move {
-                    api.get_saved_playlists(0, 30).await.map(|playlists| {
-                        let summaries = playlists.into_iter().map(|p| p.into()).collect();
-                        LoginAction::SetUserPlaylists(summaries).into()
-                    })
+                    // Fetch the user's own playlists as full descriptions (with cover
+                    // art). The login-state reducer derives the id/summary indices and
+                    // also keeps the full list so search can match & render owned
+                    // playlists locally. Cap at 50 (the API's per-page max).
+                    api.get_saved_playlists(0, 50)
+                        .await
+                        .map(|playlists| LoginAction::SetUserPlaylists(playlists).into())
                 });
         }
     }

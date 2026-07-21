@@ -9,7 +9,7 @@ use std::rc::Rc;
 use crate::app::components::utils::Debouncer;
 use crate::app::components::{Component, EventListener};
 use crate::app::dispatch::Worker;
-use crate::app::models::{CardKind, CardModel, SongDescription};
+use crate::app::models::{CardKind, CardModel, PlaylistDescription, SongDescription};
 use crate::app::state::{AppEvent, BrowserEvent};
 
 use super::search_row::SearchRow;
@@ -114,9 +114,9 @@ impl SearchResultsWidget {
                 let query = query.as_str();
                 _self.imp().status_page.set_visible(query.is_empty());
                 _self.imp().results_scroll.set_visible(!query.is_empty());
-                if !query.is_empty() {
-                    f(query.to_string());
-                }
+                // Fire on every change (including down to a single character and back
+                // to empty) so the local owned-playlist matches can update instantly.
+                f(query.to_string());
             }
         ));
     }
@@ -225,8 +225,18 @@ impl SearchResults {
         widget.connect_search_updated(clone!(
             #[weak]
             model,
+            #[weak]
+            results_store,
+            #[weak]
+            filter_model,
             move |q| {
-                model.search(q);
+                // Record the query in state and kick the (debounced) API search.
+                // An empty query clears the store; local matches need a query too.
+                model.search(q.clone());
+                // Rebuild the local owned-playlist matches immediately so a partial
+                // query (even a single character) surfaces a matching own playlist
+                // without waiting for — or depending on — the API round-trip.
+                rebuild_store(&model, &results_store, &filter_model, &q);
             }
         ));
 
@@ -284,55 +294,11 @@ impl SearchResults {
         }
     }
 
-    /// Rebuild the flat result store from the domain results, tagging each card
-    /// with its kind and whether it lives in the user's own library (so it floats
-    /// to the top). Everything lands in one store; the pill filter narrows the view.
+    /// Rebuild the store when fresh API results land. Reads the current query from
+    /// state so the local owned-playlist matches stay in sync with the API results.
     fn update_results(&self) {
-        let Some(results) = self.model.get_results() else {
-            return;
-        };
-
-        // O(1) library-membership lookups from the logged-in user's owned/saved
-        // content (playlists via login state; albums/artists via the home stores).
-        let (owned_playlists, saved_albums, followed_artists) = self.model.library_ids();
-
-        self.results_store.remove_all();
-        let mut position: u32 = 0;
-
-        // Songs (tracks). These carry CardKind::None; open → play in album context.
-        for track in results.tracks.songs.iter() {
-            let card = CardModel::from(track).with_data(track.clone());
-            card.set_insertion_position(position);
-            self.results_store.append(&card);
-            position += 1;
-        }
-
-        // Artists (round art). Float followed artists to the top.
-        for artist in results.artists.iter() {
-            let card = CardModel::from(artist);
-            card.set_pinned(followed_artists.contains(&artist.id));
-            card.set_insertion_position(position);
-            self.results_store.append(&card);
-            position += 1;
-        }
-
-        // Albums. Float saved albums to the top.
-        for album in results.albums.iter() {
-            let card = CardModel::from(album);
-            card.set_pinned(saved_albums.contains(&album.id));
-            card.set_insertion_position(position);
-            self.results_store.append(&card);
-            position += 1;
-        }
-
-        // Playlists. Float the user's own playlists to the top.
-        for playlist in results.playlists.iter() {
-            let card = CardModel::from(playlist);
-            card.set_pinned(owned_playlists.contains(&playlist.id));
-            card.set_insertion_position(position);
-            self.results_store.append(&card);
-            position += 1;
-        }
+        let query = self.model.current_query();
+        rebuild_store(&self.model, &self.results_store, &self.filter_model, &query);
     }
 
     fn update_search_query(&self) {
@@ -344,6 +310,151 @@ impl SearchResults {
                 move || model.fetch_results()
             ),
         );
+    }
+}
+
+/// Base insertion position offset applied to every API result. Local owned-playlist
+/// matches take positions `0..N` (below this base), so the "library first" sorter —
+/// which orders pinned items by insertion position — always ranks them above every
+/// API result (even a pinned/saved API album or the user's own playlist as returned
+/// by the API).
+const API_POSITION_BASE: u32 = 1_000;
+
+/// Rank of an owned-playlist name against a lowercased query. Lower is better;
+/// `None` means no match. Prefix of the whole name ranks first, then a match at a
+/// word boundary (a word in the name starts with the query), then any substring.
+fn owned_match_rank(name_lower: &str, query_lower: &str) -> Option<u32> {
+    if query_lower.is_empty() {
+        return None;
+    }
+    if name_lower.starts_with(query_lower) {
+        return Some(0);
+    }
+    // Word-boundary prefix: some word in the name starts with the query.
+    let word_prefix = name_lower
+        .split(|c: char| c.is_whitespace() || c == '-' || c == '_' || c == '/')
+        .any(|w| w.starts_with(query_lower));
+    if word_prefix {
+        return Some(1);
+    }
+    if name_lower.contains(query_lower) {
+        return Some(2);
+    }
+    None
+}
+
+/// The user's own playlists whose name matches `query` (case-insensitive contains),
+/// ranked prefix-first then by title, as (rank, playlist) pairs sorted best-first.
+fn matching_owned_playlists(
+    owned: &[PlaylistDescription],
+    query: &str,
+) -> Vec<PlaylistDescription> {
+    let query_lower = query.trim().to_lowercase();
+    if query_lower.is_empty() {
+        return Vec::new();
+    }
+    let mut matches: Vec<(u32, &PlaylistDescription)> = owned
+        .iter()
+        .filter_map(|p| {
+            owned_match_rank(&p.title.to_lowercase(), &query_lower).map(|rank| (rank, p))
+        })
+        .collect();
+    // Best rank first; within a rank, alphabetical by title for stable ordering.
+    matches.sort_by(|(ra, a), (rb, b)| {
+        ra.cmp(rb)
+            .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+    });
+    matches.into_iter().map(|(_, p)| p.clone()).collect()
+}
+
+/// Rebuild the flat result store as: the user's own matching playlists (matched
+/// locally, prepended at the very top) followed by the API results (songs, artists,
+/// albums, playlists). Local matches are deduped against the API playlists by id so
+/// a playlist the API *did* return isn't shown twice. Cards are tagged with kind and
+/// a "pinned / in your library" flag; the model chain's sorter floats pinned items
+/// (local matches first, via their low insertion position) to the top.
+fn rebuild_store(
+    model: &SearchResultsModel,
+    store: &gio::ListStore,
+    filter_model: &gtk::FilterListModel,
+    query: &str,
+) {
+    store.remove_all();
+
+    // ── Local owned-playlist matches (instant, API-independent) ──────────────
+    let owned = model.owned_playlists();
+    let local_matches = matching_owned_playlists(&owned, query);
+    let local_ids: std::collections::HashSet<String> =
+        local_matches.iter().map(|p| p.id.clone()).collect();
+
+    let mut position: u32 = 0;
+    for playlist in local_matches.iter() {
+        let card = CardModel::from(playlist);
+        card.set_pinned(true); // float above every API result
+        card.set_insertion_position(position); // 0..N: best match first
+        store.append(&card);
+        position += 1;
+    }
+
+    // O(1) library-membership lookups from the logged-in user's owned/saved
+    // content (playlists via login state; albums/artists via the home stores).
+    let (owned_playlist_ids, saved_albums, followed_artists) = model.library_ids();
+
+    // ── API results (below the local matches) ────────────────────────────────
+    let Some(results) = model.get_results() else {
+        // No API results yet (e.g. still typing / before the debounced fetch):
+        // the local matches above are already visible. Re-run the pill filter so
+        // the view reflects the new store, then return.
+        if let Some(f) = filter_model.filter() {
+            f.changed(gtk::FilterChange::Different);
+        }
+        return;
+    };
+
+    let mut position: u32 = API_POSITION_BASE;
+
+    // Songs (tracks). These carry CardKind::None; open → play in album context.
+    for track in results.tracks.songs.iter() {
+        let card = CardModel::from(track).with_data(track.clone());
+        card.set_insertion_position(position);
+        store.append(&card);
+        position += 1;
+    }
+
+    // Artists (round art). Float followed artists to the top.
+    for artist in results.artists.iter() {
+        let card = CardModel::from(artist);
+        card.set_pinned(followed_artists.contains(&artist.id));
+        card.set_insertion_position(position);
+        store.append(&card);
+        position += 1;
+    }
+
+    // Albums. Float saved albums to the top.
+    for album in results.albums.iter() {
+        let card = CardModel::from(album);
+        card.set_pinned(saved_albums.contains(&album.id));
+        card.set_insertion_position(position);
+        store.append(&card);
+        position += 1;
+    }
+
+    // Playlists. Skip any the local pass already injected (dedupe by id), and
+    // float the user's own playlists to the top of the API block.
+    for playlist in results.playlists.iter() {
+        if local_ids.contains(&playlist.id) {
+            continue;
+        }
+        let card = CardModel::from(playlist);
+        card.set_pinned(owned_playlist_ids.contains(&playlist.id));
+        card.set_insertion_position(position);
+        store.append(&card);
+        position += 1;
+    }
+
+    // Re-run the active pill filter (and thus the sort) over the rebuilt store.
+    if let Some(f) = filter_model.filter() {
+        f.changed(gtk::FilterChange::Different);
     }
 }
 
