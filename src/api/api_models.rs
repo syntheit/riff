@@ -400,6 +400,56 @@ pub struct PlayerState {
     pub item: FailibleTrackItem,
     #[allow(dead_code)] // Part of the Spotify API response but currently unused
     pub context: Option<PlayerContext>,
+    // The device the session is currently attached to. `GET /me/player` includes
+    // this so we can tell *which* remote device is playing (for the remote-mirror
+    // display); it is absent from the currently-playing/queue endpoints.
+    #[serde(default)]
+    pub device: Option<Device>,
+}
+
+// A snapshot of whatever is playing on the user's active Spotify device, built
+// from `GET /me/player`. Used to MIRROR remote playback (music playing on the
+// user's other devices) into riff's UI without hijacking riff's own local queue.
+// `None`-returning conversion means nothing meaningful is playing / no device.
+#[derive(Debug, Clone)]
+pub struct RemotePlaybackSnapshot {
+    pub device_id: String,
+    pub device_name: String,
+    pub device_kind: ConnectDeviceKind,
+    pub song: SongDescription,
+    pub is_playing: bool,
+    pub progress_ms: u32,
+    pub duration_ms: u32,
+}
+
+impl PlayerState {
+    // Build a rich remote-playback snapshot from the raw player state, or `None`
+    // when there is no device / no resolvable currently-playing track.
+    pub fn into_remote_snapshot(self) -> Option<RemotePlaybackSnapshot> {
+        let device = self.device?;
+        let item = self.item.get()?;
+        // Reuse the existing TrackItem -> SongDescription conversion (single-item
+        // page) so art/artists/album are populated exactly like everywhere else.
+        let song = Vec::<SongDescription>::from(Page::new(vec![item]))
+            .into_iter()
+            .next()?;
+        let duration_ms = song.duration_ms;
+        // Reuse Device -> ConnectDevice to derive the kind icon; keep id + name.
+        let ConnectDevice {
+            id,
+            label: name,
+            kind,
+        } = ConnectDevice::from(device);
+        Some(RemotePlaybackSnapshot {
+            device_id: id,
+            device_name: name,
+            device_kind: kind,
+            song,
+            is_playing: self.is_playing,
+            progress_ms: self.progress_ms,
+            duration_ms,
+        })
+    }
 }
 
 impl From<PlayerState> for ConnectPlayerState {
@@ -426,6 +476,22 @@ impl From<PlayerState> for ConnectPlayerState {
             repeat,
             shuffle,
             current_song_id,
+        }
+    }
+}
+
+impl From<RemotePlaybackSnapshot> for RemotePlayback {
+    fn from(s: RemotePlaybackSnapshot) -> Self {
+        RemotePlayback {
+            device: ConnectDevice {
+                id: s.device_id,
+                label: s.device_name,
+                kind: s.device_kind,
+            },
+            song: s.song,
+            is_playing: s.is_playing,
+            progress_ms: s.progress_ms,
+            duration_ms: s.duration_ms,
         }
     }
 }

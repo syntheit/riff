@@ -1,12 +1,13 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use futures::channel::mpsc::UnboundedSender;
 use gettextrs::gettext;
 
 use crate::api::{SpotifyApiClient, SpotifyApiError, SpotifyResult};
-use crate::app::models::{ConnectPlayerState, RepeatMode, SongDescription};
+use crate::app::models::{ConnectPlayerState, RemotePlayback, RepeatMode, SongDescription};
 use crate::app::state::{Device, PlaybackAction};
 use crate::app::{AppAction, SongsSource};
 
@@ -29,6 +30,11 @@ pub enum ConnectCommand {
     PlayerRepeat(RepeatMode),
     PlayerShuffle(bool),
     PlayerSetVolume(u8),
+    /// Enable/disable the remote-playback MIRROR poll (controller direction:
+    /// showing what's playing on the user's OTHER devices). Toggled by the app
+    /// based on visibility + whether riff itself is playing locally, so we only
+    /// poll `GET /me/player` when it's worth it (battery hygiene).
+    SetRemoteMirrorActive(bool),
 }
 
 pub struct ConnectPlayer {
@@ -37,6 +43,14 @@ pub struct ConnectPlayer {
     device_id: RwLock<Option<String>>,
     last_queue: RwLock<u64>,
     last_state: RwLock<ConnectPlayerState>,
+    // Whether the remote-playback mirror poll should currently run. Driven by
+    // `ConnectCommand::SetRemoteMirrorActive` from the app (visibility + local
+    // playback). We also keep the poll alive for one extra tick after it goes
+    // false so the snapshot gets cleared once.
+    mirror_active: AtomicBool,
+    // Whether a mirrored snapshot is currently published to the UI, so we only
+    // dispatch a clearing `SetRemotePlayback(None)` once (not every idle tick).
+    mirror_published: AtomicBool,
 }
 
 impl ConnectPlayer {
@@ -50,7 +64,17 @@ impl ConnectPlayer {
             device_id: Default::default(),
             last_queue: Default::default(),
             last_state: Default::default(),
+            mirror_active: AtomicBool::new(false),
+            mirror_published: AtomicBool::new(false),
         }
+    }
+
+    pub fn mirror_active(&self) -> bool {
+        self.mirror_active.load(Ordering::Relaxed)
+    }
+
+    fn set_mirror_active(&self, active: bool) {
+        self.mirror_active.store(active, Ordering::Relaxed);
     }
 
     fn send_actions(&self, actions: impl IntoIterator<Item = AppAction>) {
@@ -120,6 +144,55 @@ impl ConnectPlayer {
         self.apply_remote_state(&state).await;
         if let Ok(mut last_state) = self.last_state.write() {
             *last_state = state;
+        }
+    }
+
+    // Poll `GET /me/player` and mirror whatever is playing on the user's OTHER
+    // devices into riff's display state. Controller direction only. No-op while
+    // the user has explicitly SWITCHED to a Connect device (then `sync_state`
+    // owns the display through the main queue) — this only surfaces remote
+    // playback the user hasn't taken over.
+    pub async fn poll_remote_snapshot(&self) {
+        // If we're actively controlling a switched-to device, don't also mirror.
+        if self.has_device() {
+            self.clear_mirror_if_published();
+            return;
+        }
+
+        match self.api.get_player_snapshot().await {
+            Ok(Some(snapshot)) => {
+                eprintln!(
+                    "RIFF_CONNECT: remote-active device={:?} track={:?} playing={} progress={}ms",
+                    snapshot.device_name,
+                    snapshot.song.title,
+                    snapshot.is_playing,
+                    snapshot.progress_ms
+                );
+                let remote: RemotePlayback = snapshot.into();
+                self.mirror_published.store(true, Ordering::Relaxed);
+                self.send_actions([PlaybackAction::SetRemotePlayback(Some(remote)).into()]);
+            }
+            Ok(None) => {
+                // Nothing playing anywhere remote.
+                self.clear_mirror_if_published();
+            }
+            Err(SpotifyApiError::TooManyRequests) => {
+                debug!("mirror poll rate-limited; backing off");
+            }
+            Err(err) => {
+                debug!("mirror poll failed: {err}");
+                self.clear_mirror_if_published();
+            }
+        }
+    }
+
+    // Clear any published remote snapshot (exactly once). Called when remote
+    // playback stops, when we switch to controlling a device, or when the mirror
+    // is disabled — so the UI falls back to local display.
+    fn clear_mirror_if_published(&self) {
+        if self.mirror_published.swap(false, Ordering::Relaxed) {
+            eprintln!("RIFF_CONNECT: remote-inactive (clearing mirror)");
+            self.send_actions([PlaybackAction::SetRemotePlayback(None).into()]);
         }
     }
 
@@ -227,6 +300,9 @@ impl ConnectPlayer {
         let device_lost = match command {
             ConnectCommand::SetDevice(new_device_id) => {
                 self.device_id.write().ok()?.replace(new_device_id);
+                // We now control this device directly; the mirror must yield so
+                // the two displays don't fight (sync_state drives the main queue).
+                self.clear_mirror_if_published();
                 self.sync_state().await;
                 false
             }
@@ -234,6 +310,19 @@ impl ConnectPlayer {
                 let device_id = self.device_id.write().ok()?.take();
                 if let Some(old_id) = device_id {
                     let _ = self.api.player_pause(old_id).await;
+                }
+                false
+            }
+            ConnectCommand::SetRemoteMirrorActive(active) => {
+                self.set_mirror_active(active);
+                if active {
+                    // Poll immediately so the UI reflects remote playback without
+                    // waiting for the next tick (startup / becoming visible).
+                    self.poll_remote_snapshot().await;
+                } else {
+                    // Stopped mirroring (riff took over locally / went hidden):
+                    // drop the snapshot so the UI falls back to local display.
+                    self.clear_mirror_if_published();
                 }
                 false
             }

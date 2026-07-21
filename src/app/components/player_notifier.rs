@@ -167,6 +167,12 @@ impl PlayerNotifier {
         if let Some(command) = command {
             self.send_command_to_local_player(command);
         }
+
+        // Once logged in, start mirroring remote playback (if nothing is playing
+        // locally) so "what's playing on your other devices" shows up right away.
+        if matches!(event, LoginEvent::LoginCompleted) {
+            self.refresh_remote_mirror();
+        }
     }
 
     fn notify_connect_player(&self, event: &PlaybackEvent) {
@@ -251,6 +257,24 @@ impl PlayerNotifier {
         self.connect_command_sender.unbounded_send(command).unwrap();
     }
 
+    // Turn the remote-playback MIRROR poll on/off (controller direction: show
+    // what's playing on the user's OTHER devices). We mirror while riff is on its
+    // local device but NOT itself playing — that's when surfacing remote playback
+    // is useful. Once riff plays locally, or the user switches to a Connect device
+    // we control directly, the mirror yields.
+    fn set_remote_mirror(&self, active: bool) {
+        eprintln!("RIFF_CONNECT: set_remote_mirror({active})");
+        self.send_command_to_connect_player(ConnectCommand::SetRemoteMirrorActive(active));
+    }
+
+    // Decide + push the mirror state from current app state: active only when the
+    // active device is Local and riff isn't playing locally.
+    fn refresh_remote_mirror(&self) {
+        let is_local = matches!(&*self.device(), Device::Local);
+        let active = is_local && !self.is_playing();
+        self.set_remote_mirror(active);
+    }
+
     fn send_command_to_local_player(&self, command: Command) {
         let dispatcher = &self.dispatcher;
         self.command_sender
@@ -267,26 +291,42 @@ impl PlayerNotifier {
                 self.send_command_to_connect_player(ConnectCommand::SetDevice(device.id.clone()));
                 // Actually MOVE the current session to the chosen device (rather
                 // than only routing future commands at it). PUT /me/player.
-                self.transfer_playback_to(device.id.clone());
+                // When taking over the device we were already MIRRORING, preserve
+                // its current play-state so a paused remote isn't force-resumed
+                // (avoids a resume-then-pause flicker when the user taps pause).
+                let play = self.remote_play_state_for(&device.id).unwrap_or(true);
+                self.transfer_playback_to(device.id.clone(), play);
                 self.notify_connect_player(&PlaybackEvent::SourceChanged);
             }
             Device::Local => {
                 self.send_command_to_connect_player(ConnectCommand::PlayerStop);
                 self.notify_local_player(&PlaybackEvent::SourceChanged);
+                // Back on the local device: resume mirroring remote playback if
+                // riff isn't itself playing.
+                self.refresh_remote_mirror();
             }
         }
     }
 
-    // Transfer the active Spotify session to `device_id` and start playing there.
+    // Transfer the active Spotify session to `device_id`. `play` controls whether
+    // playback resumes on the target or is transferred paused.
     // Fire-and-forget: on error the connect poller reconciles / drops the device.
-    fn transfer_playback_to(&self, device_id: String) {
+    fn transfer_playback_to(&self, device_id: String, play: bool) {
         let api = self.app_model.get_spotify();
         self.dispatcher.dispatch_async(Box::pin(async move {
-            if let Err(err) = api.player_transfer(device_id, true).await {
+            if let Err(err) = api.player_transfer(device_id, play).await {
                 error!("failed to transfer playback: {}", err);
             }
             None
         }));
+    }
+
+    // If a remote-playback snapshot for `device_id` is currently being mirrored,
+    // return its play-state (so a takeover preserves it); otherwise `None`.
+    fn remote_play_state_for(&self, device_id: &str) -> Option<bool> {
+        let state = self.app_model.get_state();
+        let remote = state.playback.remote_playback()?;
+        (remote.device.id == device_id).then_some(remote.is_playing)
     }
 }
 
@@ -303,7 +343,25 @@ impl EventListener for PlayerNotifier {
                 });
             }
             (_, AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(d))) => self.switch_device(d),
-            (Device::Local, AppEvent::PlaybackEvent(event)) => self.notify_local_player(event),
+            // Startup + whenever the now-playing sheet opens: (re)evaluate whether
+            // to mirror remote playback, and poll it immediately.
+            (_, AppEvent::Started) | (_, AppEvent::NowPlayingSheetShown) => {
+                self.refresh_remote_mirror();
+            }
+            (Device::Local, AppEvent::PlaybackEvent(event)) => {
+                self.notify_local_player(event);
+                // Local play-state changes flip whether mirroring remote playback
+                // is useful (mirror while idle, yield once riff plays locally).
+                if matches!(
+                    event,
+                    PlaybackEvent::PlaybackResumed
+                        | PlaybackEvent::PlaybackPaused
+                        | PlaybackEvent::PlaybackStopped
+                        | PlaybackEvent::TrackChanged(_)
+                ) {
+                    self.refresh_remote_mirror();
+                }
+            }
             (Device::Local, AppEvent::SettingsEvent(SettingsEvent::PlayerSettingsChanged)) => {
                 self.send_command_to_local_player(Command::ReloadSettings)
             }

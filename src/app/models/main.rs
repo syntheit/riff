@@ -346,6 +346,20 @@ pub struct ConnectPlayerState {
     pub shuffle: bool,
 }
 
+/// A snapshot of what is playing on the user's *active* Spotify device, when
+/// that device is a REMOTE Connect device (i.e. not riff's local librespot).
+/// Populated by polling `GET /me/player`; used to MIRROR remote playback in the
+/// mini-player / now-playing UI so the user can see (and control) what's playing
+/// on their other devices — without hijacking riff's own local queue.
+#[derive(Clone, Debug)]
+pub struct RemotePlayback {
+    pub device: ConnectDevice,
+    pub song: SongDescription,
+    pub is_playing: bool,
+    pub progress_ms: u32,
+    pub duration_ms: u32,
+}
+
 impl Default for ConnectPlayerState {
     fn default() -> Self {
         Self {

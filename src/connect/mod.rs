@@ -19,6 +19,8 @@ async fn connect_server(
 ) {
     let player = Arc::new(player::ConnectPlayer::new(api, action_sender));
 
+    // Poll a device we're actively CONTROLLING (user switched to it): drives the
+    // main queue display. Runs every 5 s while a device is set.
     let player_clone = Arc::clone(&player);
     task::spawn(async move {
         let mut interval = time::interval(Duration::from_secs(5));
@@ -26,6 +28,22 @@ async fn connect_server(
             interval.tick().await;
             if player_clone.has_device() {
                 player_clone.sync_state().await;
+            }
+        }
+    });
+
+    // MIRROR poll (controller direction): surface what's playing on the user's
+    // OTHER devices. Only actually hits the API while the mirror is active (mini-
+    // player / now-playing visible AND riff isn't itself the active local player).
+    // ~4 s cadence for battery; when inactive the tick just re-checks the flag and
+    // makes no request.
+    let player_clone = Arc::clone(&player);
+    task::spawn(async move {
+        let mut interval = time::interval(Duration::from_secs(4));
+        loop {
+            interval.tick().await;
+            if player_clone.mirror_active() && !player_clone.has_device() {
+                player_clone.poll_remote_snapshot().await;
             }
         }
     });
