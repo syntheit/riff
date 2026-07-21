@@ -265,6 +265,9 @@ impl PlayerNotifier {
             Device::Connect(device) => {
                 self.send_command_to_local_player(Command::PlayerStop);
                 self.send_command_to_connect_player(ConnectCommand::SetDevice(device.id.clone()));
+                // Actually MOVE the current session to the chosen device (rather
+                // than only routing future commands at it). PUT /me/player.
+                self.transfer_playback_to(device.id.clone());
                 self.notify_connect_player(&PlaybackEvent::SourceChanged);
             }
             Device::Local => {
@@ -272,6 +275,18 @@ impl PlayerNotifier {
                 self.notify_local_player(&PlaybackEvent::SourceChanged);
             }
         }
+    }
+
+    // Transfer the active Spotify session to `device_id` and start playing there.
+    // Fire-and-forget: on error the connect poller reconciles / drops the device.
+    fn transfer_playback_to(&self, device_id: String) {
+        let api = self.app_model.get_spotify();
+        self.dispatcher.dispatch_async(Box::pin(async move {
+            if let Err(err) = api.player_transfer(device_id, true).await {
+                error!("failed to transfer playback: {}", err);
+            }
+            None
+        }));
     }
 }
 

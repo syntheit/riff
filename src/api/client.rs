@@ -757,6 +757,42 @@ impl SpotifyClient {
             .uri("/v1/me/player/pause".to_string(), Some(&query))
     }
 
+    pub(crate) fn player_next(&self, device_id: &str) -> SpotifyRequest<'_, (), ()> {
+        let query = make_query_params()
+            .append_pair("device_id", device_id)
+            .finish();
+        self.request()
+            .method(Method::POST)
+            .uri("/v1/me/player/next".to_string(), Some(&query))
+    }
+
+    pub(crate) fn player_previous(&self, device_id: &str) -> SpotifyRequest<'_, (), ()> {
+        let query = make_query_params()
+            .append_pair("device_id", device_id)
+            .finish();
+        self.request()
+            .method(Method::POST)
+            .uri("/v1/me/player/previous".to_string(), Some(&query))
+    }
+
+    // Transfer the active playback session to `device_id`. Unlike the other
+    // player_* helpers this does not take a `?device_id=` query — the target is
+    // passed in the JSON body. `play` controls whether playback starts on the
+    // new device or is transferred paused.
+    pub(crate) fn player_transfer(
+        &self,
+        device_id: &str,
+        play: bool,
+    ) -> SpotifyRequest<'_, Vec<u8>, ()> {
+        self.request()
+            .method(Method::PUT)
+            .uri("/v1/me/player".to_string(), None)
+            .json_body(TransferRequest {
+                device_ids: vec![device_id.to_string()],
+                play,
+            })
+    }
+
     pub(crate) fn player_seek(&self, device_id: &str, pos: usize) -> SpotifyRequest<'_, (), ()> {
         let query = make_query_params()
             .append_pair("device_id", device_id)

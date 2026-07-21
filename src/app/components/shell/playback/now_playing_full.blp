@@ -13,6 +13,13 @@ template $NowPlayingFullWidget : Adw.Bin {
         focus-on-click: false;
         can-focus: false;
       }
+
+      // Hidden by default; shown + wired only when FeatureFlag::DeviceSelector
+      // is enabled (see App::make_device_selector).
+      [end]
+      $DeviceSelectorWidget device_selector {
+        visible: false;
+      }
     }
 
     // height-request forces the sheet to full window height (it's capped at the
@@ -69,6 +76,20 @@ template $NowPlayingFullWidget : Adw.Bin {
           styles [
             "title-4",
             "dim-label",
+          ]
+        }
+
+        // "Playing on <device>" — shown only while a Connect device is active,
+        // hidden when playing locally. Driven from NowPlayingSheet::on_event.
+        Label playing_on_label {
+          ellipsize: end;
+          xalign: 0;
+          label: "";
+          visible: false;
+
+          styles [
+            "caption",
+            "accent",
           ]
         }
       }

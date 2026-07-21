@@ -116,6 +116,14 @@ pub trait SpotifyApiClient {
 
     fn player_resume(&self, device_id: String) -> BoxFuture<SpotifyResult<()>>;
 
+    fn player_next(&self, device_id: String) -> BoxFuture<SpotifyResult<()>>;
+
+    fn player_previous(&self, device_id: String) -> BoxFuture<SpotifyResult<()>>;
+
+    /// Transfer the active playback session to `device_id`. When `play` is true
+    /// playback resumes on the target device, otherwise it is transferred paused.
+    fn player_transfer(&self, device_id: String, play: bool) -> BoxFuture<SpotifyResult<()>>;
+
     fn player_seek(&self, device_id: String, pos: usize) -> BoxFuture<SpotifyResult<()>>;
 
     fn player_repeat(&self, device_id: String, mode: RepeatMode) -> BoxFuture<SpotifyResult<()>>;
@@ -905,6 +913,22 @@ impl SpotifyApiClient for CachedSpotifyClient {
 
     fn player_resume(&self, device_id: String) -> BoxFuture<SpotifyResult<()>> {
         Box::pin(self.client.player_resume(&device_id).send_no_response())
+    }
+
+    fn player_next(&self, device_id: String) -> BoxFuture<SpotifyResult<()>> {
+        Box::pin(self.client.player_next(&device_id).send_no_response())
+    }
+
+    fn player_previous(&self, device_id: String) -> BoxFuture<SpotifyResult<()>> {
+        Box::pin(self.client.player_previous(&device_id).send_no_response())
+    }
+
+    fn player_transfer(&self, device_id: String, play: bool) -> BoxFuture<SpotifyResult<()>> {
+        Box::pin(
+            self.client
+                .player_transfer(&device_id, play)
+                .send_no_response(),
+        )
     }
 
     fn player_play_in_context(

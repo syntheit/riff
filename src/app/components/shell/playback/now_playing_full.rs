@@ -1,9 +1,11 @@
+use gettextrs::*;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::{glib, CompositeTemplate};
 use libadwaita::subclass::prelude::BinImpl;
 
 use crate::app::components::utils::{format_duration, Clock, Debouncer};
+use crate::app::components::DeviceSelectorWidget;
 use crate::app::loader::ImageLoader;
 use crate::app::models::RepeatMode;
 use crate::app::Worker;
@@ -49,6 +51,12 @@ mod imp {
 
         #[template_child]
         pub close_button: TemplateChild<gtk::Button>,
+
+        #[template_child]
+        pub device_selector: TemplateChild<DeviceSelectorWidget>,
+
+        #[template_child]
+        pub playing_on_label: TemplateChild<gtk::Label>,
 
         pub clock: Clock,
     }
@@ -227,5 +235,30 @@ impl NowPlayingFullWidget {
 
     pub fn connect_close<F: Fn() + 'static>(&self, f: F) {
         self.imp().close_button.connect_clicked(move |_| f());
+    }
+
+    // The embedded Spotify Connect device selector, instantiated as part of this
+    // widget's template. Returned so the DeviceSelector component can drive it.
+    pub fn device_selector(&self) -> DeviceSelectorWidget {
+        self.imp().device_selector.get()
+    }
+
+    // Show "Playing on <device>" while a Connect device is active; hide it when
+    // playing locally (`name == None`).
+    pub fn set_playing_on(&self, name: Option<&str>) {
+        let imp = self.imp();
+        match name {
+            Some(name) => {
+                // translators: shown in the now-playing view when playback is on
+                // a remote Spotify Connect device; {} is the device name.
+                imp.playing_on_label
+                    .set_text(&gettext!("Playing on {}", name));
+                imp.playing_on_label.set_visible(true);
+            }
+            None => {
+                imp.playing_on_label.set_text("");
+                imp.playing_on_label.set_visible(false);
+            }
+        }
     }
 }

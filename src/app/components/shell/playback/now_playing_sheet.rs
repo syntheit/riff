@@ -5,7 +5,7 @@ use gtk::prelude::*;
 
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
-use crate::app::state::{BrowserEvent, PlaybackAction, PlaybackEvent};
+use crate::app::state::{BrowserEvent, Device, PlaybackAction, PlaybackEvent};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
@@ -74,6 +74,14 @@ impl NowPlayingSheetModel {
 
     fn current_song(&self) -> Option<SongDescription> {
         self.state().playback.current_song()
+    }
+
+    // Name of the active remote Connect device, or None when playing locally.
+    fn current_device_name(&self) -> Option<String> {
+        match self.state().playback.current_device() {
+            Device::Connect(device) => Some(device.label.clone()),
+            Device::Local => None,
+        }
     }
 
     fn is_current_song_liked(&self) -> bool {
@@ -191,6 +199,14 @@ impl NowPlayingSheet {
         self.widget.set_repeat_mode(self.model.repeat_mode());
         self.update_current_info();
         self.widget.set_seek_position(self.last_position as f64);
+        self.update_playing_on();
+    }
+
+    // Reflect the active device in the "Playing on <device>" label — the remote
+    // device name when a Connect device is active, hidden when playing locally.
+    fn update_playing_on(&self) {
+        self.widget
+            .set_playing_on(self.model.current_device_name().as_deref());
     }
 }
 
@@ -224,6 +240,10 @@ impl EventListener for NowPlayingSheet {
             }
             AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated) => {
                 self.widget.set_liked(self.model.is_current_song_liked());
+            }
+            AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_))
+            | AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
+                self.update_playing_on();
             }
             AppEvent::NowPlayingSheetShown => {
                 self.sync_all();

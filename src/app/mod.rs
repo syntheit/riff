@@ -154,11 +154,37 @@ impl App {
                 worker.clone(),
                 pins.clone(),
             ),
-            App::make_user_menu(builder, Rc::clone(model), dispatcher, worker.clone()),
+            App::make_user_menu(builder, Rc::clone(model), dispatcher.box_clone(), worker.clone()),
             App::make_notification(builder),
         ];
 
+        // The Spotify Connect device selector lives in the now-playing header.
+        // It is gated behind FeatureFlag::DeviceSelector so it can ship dark; the
+        // embedded widget is always instantiated (part of the now_playing_full
+        // template) but only wired to the reducer + shown when the flag is on.
+        if feature_flags::is_enabled(feature_flags::FeatureFlag::DeviceSelector) {
+            components.push(App::make_device_selector(
+                builder,
+                Rc::clone(model),
+                dispatcher,
+            ));
+        }
+
         self.components.append(&mut components);
+    }
+
+    fn make_device_selector(
+        builder: &gtk::Builder,
+        app_model: Rc<AppModel>,
+        dispatcher: Box<dyn ActionDispatcher>,
+    ) -> Box<impl EventListener> {
+        // The selector widget is instantiated as a child of the now-playing full
+        // view template; pull that same instance out and drive it.
+        let now_playing_full: NowPlayingFullWidget = builder.object("now_playing_full").unwrap();
+        let widget = now_playing_full.device_selector();
+        widget.set_visible(true);
+        let model = DeviceSelectorModel::new(app_model, dispatcher);
+        Box::new(DeviceSelector::new(widget, model))
     }
 
     // A component that listens to what's happening in the app, and translates it for the actual player

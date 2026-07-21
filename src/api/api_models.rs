@@ -37,6 +37,14 @@ pub enum PlayRequest {
     },
 }
 
+// Body for `PUT /v1/me/player` (transfer playback). Only a single device id is
+// supported by the API; `play` controls whether it resumes on transfer.
+#[derive(Serialize)]
+pub struct TransferRequest {
+    pub device_ids: Vec<String>,
+    pub play: bool,
+}
+
 #[derive(Serialize)]
 pub struct Ids {
     pub ids: Vec<String>,
