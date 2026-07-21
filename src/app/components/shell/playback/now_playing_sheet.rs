@@ -6,7 +6,7 @@ use gtk::prelude::*;
 
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
-use crate::app::state::{BrowserAction, BrowserEvent, Device, PlaybackAction, PlaybackEvent, ScreenName};
+use crate::app::state::{BrowserAction, BrowserEvent, PlaybackAction, PlaybackEvent, ScreenName};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, SongsSource, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
@@ -62,7 +62,8 @@ impl NowPlayingSheetModel {
     }
 
     fn is_playing(&self) -> bool {
-        self.state().playback.is_playing()
+        // Remote play-state while mirroring a remote device, else local.
+        self.state().playback.displayed_is_playing()
     }
 
     fn is_shuffled(&self) -> bool {
@@ -74,15 +75,14 @@ impl NowPlayingSheetModel {
     }
 
     fn current_song(&self) -> Option<SongDescription> {
-        self.state().playback.current_song()
+        // Remote snapshot's track while mirroring a remote device, else local.
+        self.state().playback.displayed_song()
     }
 
-    // Name of the active remote Connect device, or None when playing locally.
+    // Name of the device to show in "Playing on X": the mirrored remote device
+    // (controller direction) or the switched-to Connect device; None when local.
     fn current_device_name(&self) -> Option<String> {
-        match self.state().playback.current_device() {
-            Device::Connect(device) => Some(device.label.clone()),
-            Device::Local => None,
-        }
+        self.state().playback.displayed_device_name()
     }
 
     fn is_current_song_liked(&self) -> bool {
@@ -366,6 +366,21 @@ impl EventListener for NowPlayingSheet {
             AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_))
             | AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
                 self.update_playing_on();
+            }
+            // Remote playback (on another device) changed while the sheet is open:
+            // re-render the whole view from the mirrored snapshot.
+            AppEvent::PlaybackEvent(PlaybackEvent::RemotePlaybackChanged) => {
+                let progress = self
+                    .model
+                    .state()
+                    .playback
+                    .remote_playback()
+                    .map(|r| r.progress_ms);
+                if let Some(progress) = progress {
+                    self.last_position = progress;
+                }
+                self.sync_all();
+                self.widget.set_liked(self.model.is_current_song_liked());
             }
             AppEvent::NowPlayingSheetShown => {
                 self.sync_all();

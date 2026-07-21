@@ -29,6 +29,11 @@ pub struct PlaybackState {
     // on the context track and playback resumes there when the queue drains.
     manual_queue: VecDeque<SongDescription>,
     current_override: Option<SongDescription>,
+    // What's playing on the user's OTHER (remote Connect) devices, mirrored from
+    // polling `GET /me/player`. This is display-only state, kept separate from the
+    // fields above so surfacing remote playback never hijacks riff's local queue.
+    // `Some` only while a remote device is the active player; `None` otherwise.
+    remote_playback: Option<RemotePlayback>,
 }
 
 // Most mutatings methods shouldn't be pub
@@ -326,6 +331,57 @@ impl PlaybackState {
     pub fn current_device(&self) -> &Device {
         &self.current_device
     }
+
+    /// The remote-playback snapshot (what's playing on another device), if any.
+    pub fn remote_playback(&self) -> Option<&RemotePlayback> {
+        self.remote_playback.as_ref()
+    }
+
+    /// Whether the UI should MIRROR remote playback right now: a remote snapshot
+    /// exists, the active device is Local (we haven't switched to control a
+    /// Connect device directly), AND riff isn't itself playing locally. This is
+    /// the single "prefer remote vs local" decision the mini-player / now-playing
+    /// read. (We mirror whether the remote is playing or paused, so the user can
+    /// still see a paused remote track and resume it.)
+    pub fn is_mirroring_remote(&self) -> bool {
+        self.remote_playback.is_some()
+            && matches!(self.current_device, Device::Local)
+            && !self.is_playing()
+    }
+
+    /// The track to display: the remote snapshot's track while mirroring a remote
+    /// device, otherwise riff's own current (local / switched-Connect) track.
+    pub fn displayed_song(&self) -> Option<SongDescription> {
+        if self.is_mirroring_remote() {
+            self.remote_playback.as_ref().map(|r| r.song.clone())
+        } else {
+            self.current_song()
+        }
+    }
+
+    /// The play/pause state to display (remote while mirroring, else local).
+    pub fn displayed_is_playing(&self) -> bool {
+        if self.is_mirroring_remote() {
+            self.remote_playback
+                .as_ref()
+                .map(|r| r.is_playing)
+                .unwrap_or(false)
+        } else {
+            self.is_playing()
+        }
+    }
+
+    /// The name of the device to show in the "Playing on X" indicator: the remote
+    /// snapshot's device while mirroring, else the switched-to Connect device.
+    pub fn displayed_device_name(&self) -> Option<String> {
+        if self.is_mirroring_remote() {
+            return self.remote_playback.as_ref().map(|r| r.device.label.clone());
+        }
+        match &self.current_device {
+            Device::Connect(device) => Some(device.label.clone()),
+            Device::Local => None,
+        }
+    }
 }
 
 impl Default for PlaybackState {
@@ -344,6 +400,7 @@ impl Default for PlaybackState {
             volume: -1.0,
             manual_queue: VecDeque::new(),
             current_override: None,
+            remote_playback: None,
         }
     }
 }
@@ -377,6 +434,9 @@ pub enum PlaybackAction {
     },
     SwitchDevice(Device),
     SetAvailableDevices(Vec<ConnectDevice>),
+    /// Set (or clear) the mirrored remote-playback snapshot from a poll of
+    /// `GET /me/player`. `None` clears it (remote stopped / became local).
+    SetRemotePlayback(Option<RemotePlayback>),
 }
 
 impl From<PlaybackAction> for AppAction {
@@ -407,6 +467,9 @@ pub enum PlaybackEvent {
     PlaybackStopped,
     SwitchedDevice(Device),
     AvailableDevicesChanged,
+    /// The mirrored remote-playback snapshot changed (track/state/progress on
+    /// another device, or it appeared/disappeared). UI re-renders from it.
+    RemotePlaybackChanged,
 }
 
 impl From<PlaybackEvent> for AppEvent {
@@ -558,6 +621,27 @@ impl UpdatableState for PlaybackState {
                 self.available_devices = list;
                 vec![PlaybackEvent::AvailableDevicesChanged]
             }
+            PlaybackAction::SetRemotePlayback(snapshot) => {
+                // Only emit when something the UI cares about actually changed
+                // (device / track / play-state / a >1s progress jump), so the
+                // ~4s poll doesn't fan out a re-render + MPRIS churn every tick.
+                let changed = match (&self.remote_playback, &snapshot) {
+                    (None, None) => false,
+                    (Some(a), Some(b)) => {
+                        a.device.id != b.device.id
+                            || a.song.id != b.song.id
+                            || a.is_playing != b.is_playing
+                            || a.progress_ms.abs_diff(b.progress_ms) > 1500
+                    }
+                    _ => true,
+                };
+                self.remote_playback = snapshot;
+                if changed {
+                    vec![PlaybackEvent::RemotePlaybackChanged]
+                } else {
+                    vec![]
+                }
+            }
             PlaybackAction::SwitchDevice(new_device) => {
                 self.current_device = new_device.clone();
                 vec![PlaybackEvent::SwitchedDevice(new_device)]
@@ -654,6 +738,20 @@ mod tests {
         }
     }
 
+    fn remote(id: &str, song_id: &str, playing: bool, progress: u32) -> RemotePlayback {
+        RemotePlayback {
+            device: ConnectDevice {
+                id: id.to_string(),
+                label: "Desktop".to_string(),
+                kind: ConnectDeviceKind::Computer,
+            },
+            song: song(song_id),
+            is_playing: playing,
+            progress_ms: progress,
+            duration_ms: 200_000,
+        }
+    }
+
     #[test]
     fn test_initial_state() {
         let state = PlaybackState::default();
@@ -662,6 +760,87 @@ mod tests {
         assert!(state.current_song().is_none());
         assert!(state.prev_index().is_none());
         assert!(state.next_index().is_none());
+    }
+
+    #[test]
+    fn test_remote_mirror_displays_remote_track_when_idle() {
+        let mut state = PlaybackState::default();
+        // Idle locally on the local device: a remote snapshot should mirror.
+        let events = state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(
+            remote("dev1", "remote-song", true, 5000),
+        ))));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::RemotePlaybackChanged)));
+        assert!(state.is_mirroring_remote());
+        assert!(state.displayed_is_playing());
+        assert_eq!(
+            state.displayed_song().map(|s| s.id),
+            Some("remote-song".to_string())
+        );
+        assert_eq!(state.displayed_device_name(), Some("Desktop".to_string()));
+    }
+
+    #[test]
+    fn test_local_playback_wins_over_stale_remote_snapshot() {
+        let mut state = PlaybackState::default();
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        // Now riff plays locally: the mirror must yield to the local track.
+        state.queue(vec![song("local-song")]);
+        state.play("local-song");
+        assert!(state.is_playing());
+        assert!(!state.is_mirroring_remote());
+        assert_eq!(
+            state.displayed_song().map(|s| s.id),
+            Some("local-song".to_string())
+        );
+    }
+
+    #[test]
+    fn test_switched_connect_device_does_not_mirror() {
+        let mut state = PlaybackState::default();
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        // Explicitly switched to controlling a Connect device: no mirror (the main
+        // queue drives the display instead).
+        state.update_with(Cow::Owned(PlaybackAction::SwitchDevice(Device::Connect(
+            ConnectDevice {
+                id: "dev1".to_string(),
+                label: "Desktop".to_string(),
+                kind: ConnectDeviceKind::Computer,
+            },
+        ))));
+        assert!(!state.is_mirroring_remote());
+    }
+
+    #[test]
+    fn test_remote_snapshot_change_detection() {
+        let mut state = PlaybackState::default();
+        // First set -> change.
+        assert!(!state
+            .update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+                "dev1", "s1", true, 1000
+            )))))
+            .is_empty());
+        // Same track/state, tiny progress drift -> no event.
+        assert!(state
+            .update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+                "dev1", "s1", true, 1200
+            )))))
+            .is_empty());
+        // Big progress jump (seek) -> event.
+        assert!(!state
+            .update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+                "dev1", "s1", true, 60000
+            )))))
+            .is_empty());
+        // Clearing -> event.
+        assert!(!state
+            .update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(None)))
+            .is_empty());
     }
 
     #[test]

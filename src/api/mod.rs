@@ -4,6 +4,7 @@ mod client;
 
 pub mod cache;
 
+pub use api_models::RemotePlaybackSnapshot;
 pub use cached_client::{CachedSpotifyClient, SpotifyApiClient, SpotifyResult};
 pub use client::SpotifyApiError;
 

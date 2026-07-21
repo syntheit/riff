@@ -148,6 +148,12 @@ pub trait SpotifyApiClient {
 
     fn player_state(&self) -> BoxFuture<SpotifyResult<ConnectPlayerState>>;
 
+    /// A rich snapshot of whatever is playing on the user's *active* Spotify
+    /// device (`GET /me/player`), for MIRRORING remote playback into riff's UI.
+    /// `Ok(None)` means nothing is playing / no active device (a 204 from the
+    /// API, or an unresolvable item) — this is not an error.
+    fn get_player_snapshot(&self) -> BoxFuture<SpotifyResult<Option<RemotePlaybackSnapshot>>>;
+
     fn get_followed_artists(
         &self,
         after: Option<String>,
@@ -987,6 +993,23 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .deserialize()
                 .ok_or(SpotifyApiError::NoContent)?;
             Ok(result.into())
+        })
+    }
+
+    fn get_player_snapshot(&self) -> BoxFuture<SpotifyResult<Option<RemotePlaybackSnapshot>>> {
+        Box::pin(async move {
+            // `GET /me/player` returns 204 (surfaced as NoContent) when there is
+            // no active device / nothing playing — treat that as "no remote
+            // playback", not an error.
+            let response = match self.client.player_state().send().await {
+                Ok(r) => r,
+                Err(SpotifyApiError::NoContent) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            let Some(state) = response.deserialize() else {
+                return Ok(None);
+            };
+            Ok(state.into_remote_snapshot())
         })
     }
 

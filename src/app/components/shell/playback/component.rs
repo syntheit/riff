@@ -30,7 +30,8 @@ impl PlaybackModel {
     }
 
     fn is_playing(&self) -> bool {
-        self.state().playback.is_playing()
+        // Reflect remote play-state while mirroring a remote device, else local.
+        self.state().playback.displayed_is_playing()
     }
 
     fn is_shuffled(&self) -> bool {
@@ -38,22 +39,104 @@ impl PlaybackModel {
     }
 
     fn current_song(&self) -> Option<SongDescription> {
-        self.app_model.get_state().playback.current_song()
+        // The track to show: remote snapshot's track while mirroring, else local.
+        self.app_model.get_state().playback.displayed_song()
+    }
+
+    // Whether the mini-player is currently mirroring a remote device's playback.
+    fn is_mirroring_remote(&self) -> bool {
+        self.state().playback.is_mirroring_remote()
+    }
+
+    // Current progress (ms) of the displayed track: from the remote snapshot when
+    // mirroring (so the mini-bar shows the right spot), else 0 (local seek events
+    // drive the local case).
+    fn remote_progress_ms(&self) -> Option<u32> {
+        self.state()
+            .playback
+            .remote_playback()
+            .filter(|_| self.is_mirroring_remote())
+            .map(|r| r.progress_ms)
+    }
+
+    // The remote device we're currently mirroring (id + snapshot), if the mini-
+    // player is in remote-mirror mode. Transport presses drive THIS device via
+    // the Web API directly (no local queue involved).
+    fn mirrored_remote(&self) -> Option<RemotePlayback> {
+        let state = self.state();
+        if !state.playback.is_mirroring_remote() {
+            return None;
+        }
+        state.playback.remote_playback().cloned()
+    }
+
+    // Run a transport call against the mirrored remote device via the Web API,
+    // then optimistically update the mirrored snapshot so the UI reacts instantly
+    // (the ~4s poll will reconcile). `update` mutates the local snapshot copy.
+    fn remote_control<F>(&self, device_id: String, call: F, updated: Option<RemotePlayback>)
+    where
+        F: std::future::Future<Output = crate::api::SpotifyResult<()>> + Send + 'static,
+    {
+        eprintln!("RIFF_CONNECT: mini-player driving remote device={device_id}");
+        if let Some(snapshot) = updated {
+            self.dispatcher
+                .dispatch(PlaybackAction::SetRemotePlayback(Some(snapshot)).into());
+        }
+        self.dispatcher.dispatch_async(Box::pin(async move {
+            if let Err(err) = call.await {
+                error!("remote transport failed: {}", err);
+            }
+            None
+        }));
     }
 
     fn play_next_song(&self) {
+        if let Some(remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let call = { let id = id.clone(); async move { api.player_next(id).await } };
+            self.remote_control(id, call, None);
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::Next.into());
     }
 
     fn play_prev_song(&self) {
+        if let Some(remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let call = { let id = id.clone(); async move { api.player_previous(id).await } };
+            self.remote_control(id, call, None);
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::Previous.into());
     }
 
     fn toggle_playback(&self) {
+        if let Some(mut remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let was_playing = remote.is_playing;
+            remote.is_playing = !was_playing; // optimistic
+            let call = {
+                let id = id.clone();
+                async move {
+                    if was_playing {
+                        api.player_pause(id).await
+                    } else {
+                        api.player_resume(id).await
+                    }
+                }
+            };
+            self.remote_control(id, call, Some(remote));
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::TogglePlay.into());
     }
 
     fn toggle_shuffle(&self) {
+        // Shuffle isn't exposed on the mirrored bar path; drive locally as before
+        // (only reachable when not mirroring).
         self.dispatcher
             .dispatch(PlaybackAction::ToggleShuffle.into());
     }
@@ -64,11 +147,28 @@ impl PlaybackModel {
     }
 
     fn seek_to(&self, position: u32) {
+        if let Some(mut remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let pos = position as usize;
+            remote.progress_ms = position; // optimistic
+            let call = { let id = id.clone(); async move { api.player_seek(id, pos).await } };
+            self.remote_control(id, call, Some(remote));
+            return;
+        }
         self.dispatcher
             .dispatch(PlaybackAction::Seek(position).into());
     }
 
     fn set_volume(&self, value: f64) {
+        if let Some(remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let vol = (value * 100f64).trunc() as u8;
+            let call = { let id = id.clone(); async move { api.player_volume(id, vol).await } };
+            self.remote_control(id, call, None);
+            return;
+        }
         self.dispatcher
             .dispatch(PlaybackAction::SetVolume(value).into())
     }
@@ -190,6 +290,18 @@ impl PlaybackControl {
     fn sync_seek(&self, pos: u32) {
         self.widget.set_seek_position(pos as f64);
     }
+
+    // Re-render the mini-player from the mirrored remote-playback snapshot: track
+    // info, play/pause, and the current progress spot. Also handles the snapshot
+    // being cleared (falls back to the local current song, or hides the bar).
+    fn update_remote(&self) {
+        self.update_current_info();
+        self.update_playing();
+        self.widget.set_liked(self.model.is_current_song_liked());
+        if let Some(pos) = self.model.remote_progress_ms() {
+            self.widget.set_seek_position(pos as f64);
+        }
+    }
 }
 
 impl EventListener for PlaybackControl {
@@ -226,6 +338,11 @@ impl EventListener for PlaybackControl {
             }
             AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated) => {
                 self.widget.set_liked(self.model.is_current_song_liked());
+            }
+            // Remote playback appeared / changed / cleared — mirror it (or fall
+            // back to local) in the mini-player bar.
+            AppEvent::PlaybackEvent(PlaybackEvent::RemotePlaybackChanged) => {
+                self.update_remote();
             }
             _ => {}
         }

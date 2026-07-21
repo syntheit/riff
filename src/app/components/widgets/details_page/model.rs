@@ -333,6 +333,7 @@ mod tests {
         stub_api_method!(player_play_in_context(_device_id: String, _context: String, _offset: usize) -> ());
         stub_api_method!(player_play_no_context(_device_id: String, _uris: Vec<String>, _offset: usize) -> ());
         stub_api_method!(player_state() -> ConnectPlayerState);
+        stub_api_method!(get_player_snapshot() -> Option<crate::api::RemotePlaybackSnapshot>);
         stub_api_method!(get_followed_artists(_after: Option<String>, _limit: usize) -> (Vec<ArtistSummary>, Option<String>));
         stub_api_method!(recently_played(_limit: usize) -> (Vec<SongDescription>, Vec<JumpBackContext>));
         stub_api_method!(get_top_artists(_limit: usize) -> Vec<ArtistSummary>);
