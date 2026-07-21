@@ -53,6 +53,15 @@ mod imp {
         pub close_button: TemplateChild<gtk::Button>,
 
         #[template_child]
+        pub source_button: TemplateChild<gtk::Button>,
+
+        #[template_child]
+        pub source_type_label: TemplateChild<gtk::Label>,
+
+        #[template_child]
+        pub source_name_label: TemplateChild<gtk::Label>,
+
+        #[template_child]
         pub device_selector: TemplateChild<DeviceSelectorWidget>,
 
         #[template_child]
@@ -235,6 +244,30 @@ impl NowPlayingFullWidget {
 
     pub fn connect_close<F: Fn() + 'static>(&self, f: F) {
         self.imp().close_button.connect_clicked(move |_| f());
+    }
+
+    // Wire the tappable "Playing from <source>" header. The callback navigates to
+    // the current playback source and closes the sheet.
+    pub fn connect_source<F: Fn() + 'static>(&self, f: F) {
+        self.imp().source_button.connect_clicked(move |_| f());
+    }
+
+    // Set (and show) the "PLAYING FROM <TYPE>" / "<name>" source header, or hide
+    // it when there's no navigable source (`info == None`).
+    pub fn set_source(&self, info: Option<(&str, &str)>) {
+        let imp = self.imp();
+        match info {
+            Some((type_label, name)) => {
+                imp.source_type_label.set_text(type_label);
+                imp.source_name_label.set_text(name);
+                imp.source_button.set_visible(true);
+            }
+            None => {
+                imp.source_type_label.set_text("");
+                imp.source_name_label.set_text("");
+                imp.source_button.set_visible(false);
+            }
+        }
     }
 
     // The embedded Spotify Connect device selector, instantiated as part of this

@@ -156,6 +156,16 @@ impl ScreenFactory {
         Details::new(model, self.worker.clone())
     }
 
+    pub fn make_radio(&self, seed_id: String, seed_name: String) -> impl ListenerComponent {
+        let model = Rc::new(RadioModel::new(
+            seed_id,
+            seed_name,
+            Rc::clone(&self.app_model),
+            self.dispatcher.box_clone(),
+        ));
+        Radio::new(model, self.worker.clone())
+    }
+
     pub fn make_search_results(&self) -> impl ListenerComponent {
         let model =
             SearchResultsModel::new(Rc::clone(&self.app_model), self.dispatcher.box_clone());

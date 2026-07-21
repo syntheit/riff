@@ -16,6 +16,9 @@ pub use details_user::*;
 mod queue;
 pub use queue::*;
 
+mod radio;
+pub use radio::*;
+
 mod home;
 pub use home::*;
 

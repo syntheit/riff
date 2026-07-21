@@ -14,6 +14,47 @@ template $NowPlayingFullWidget : Adw.Bin {
         can-focus: false;
       }
 
+      // "PLAYING FROM <TYPE>" / "<name>" — the tappable source header (mirrors
+      // Spotify). Hidden until there's a navigable source; tapping navigates to
+      // that source and closes the sheet. Driven from NowPlayingSheet::on_event.
+      [title]
+      Button source_button {
+        visible: false;
+        focus-on-click: false;
+        can-focus: false;
+
+        styles [
+          "flat",
+        ]
+
+        Box {
+          orientation: vertical;
+          valign: center;
+          halign: center;
+
+          Label source_type_label {
+            ellipsize: end;
+            xalign: 0.5;
+            label: "";
+
+            styles [
+              "caption-heading",
+              "dim-label",
+            ]
+          }
+
+          Label source_name_label {
+            ellipsize: end;
+            xalign: 0.5;
+            label: "";
+
+            styles [
+              "heading",
+            ]
+          }
+        }
+      }
+
       // Hidden by default; shown + wired only when FeatureFlag::DeviceSelector
       // is enabled (see App::make_device_selector).
       [end]

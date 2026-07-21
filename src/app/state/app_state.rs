@@ -48,9 +48,10 @@ pub enum AppAction {
     /// The player resolved a radio station: `seed_id` is the seed track and
     /// `songs` are the fully-hydrated station tracks (seed first, then similar).
     /// Metadata is hydrated on the player thread via the librespot internal
-    /// metadata API (the Web API 403s for this dev-mode app), so this now carries
-    /// finished `SongDescription`s. The station is loaded into playback,
-    /// replacing the current queue.
+    /// metadata API (the Web API 403s for this dev-mode app), so this carries
+    /// finished `SongDescription`s. Instead of auto-playing, this pushes a
+    /// browsable Radio screen (like a playlist) and populates it; playback only
+    /// starts when the user taps a track there.
     StartRadioResolved {
         seed_id: String,
         songs: Vec<crate::app::models::SongDescription>,
@@ -181,7 +182,35 @@ impl AppState {
             AppAction::ShowSongMenu(song) => vec![AppEvent::SongMenuShown(song)],
             AppAction::StartRadio(seed_id) => vec![AppEvent::RadioRequested(seed_id)],
             AppAction::StartRadioResolved { seed_id, songs } => {
-                vec![AppEvent::RadioResolved { seed_id, songs }]
+                // Derive a human label for the station from the seed track (which
+                // the player thread puts first): prefer its title, fall back to
+                // the first available track, then to the raw id.
+                let seed_name = songs
+                    .iter()
+                    .find(|s| s.id == seed_id)
+                    .or_else(|| songs.first())
+                    .map(|s| s.title.clone())
+                    .unwrap_or_else(|| seed_id.clone());
+
+                // Open (or navigate back to) the browsable Radio screen for this
+                // seed, then hand it the resolved tracks. Both go through the
+                // browser reducer: the push creates/finds the RadioState, and the
+                // SetRadioTracks (forwarded to every screen on the stack) fills the
+                // one whose seed_id matches. No auto-play.
+                let mut events = forward_action(
+                    BrowserAction::NavigationPush(ScreenName::Radio {
+                        seed_id: seed_id.clone(),
+                        seed_name,
+                    }),
+                    &mut self.browser,
+                );
+                events.extend(forward_action(
+                    BrowserAction::SetRadioTracks(seed_id.clone(), songs.clone()),
+                    &mut self.browser,
+                ));
+                // Kept so the song-menu sheet can close itself in response.
+                events.push(AppEvent::RadioResolved { seed_id, songs });
+                events
             }
             AppAction::ShowLibraryItemMenu(item) => vec![AppEvent::LibraryItemMenuShown(item)],
             AppAction::LibraryPinsChanged => vec![AppEvent::LibraryPinsChanged],

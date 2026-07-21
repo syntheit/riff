@@ -143,6 +143,10 @@ impl Navigation {
                 Box::new(self.screen_factory.make_playlist_details(id.to_owned()))
             }
             ScreenName::User(id) => Box::new(self.screen_factory.make_user_details(id.to_owned())),
+            ScreenName::Radio { seed_id, seed_name } => Box::new(
+                self.screen_factory
+                    .make_radio(seed_id.to_owned(), seed_name.to_owned()),
+            ),
             ScreenName::SavedTracks => Box::new(self.screen_factory.make_saved_tracks()),
             ScreenName::Settings => Box::new(self.screen_factory.make_settings()),
             // Home is the tab shell (never pushed); Search is a persistent tab.

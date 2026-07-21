@@ -18,6 +18,11 @@ pub enum SongsSource {
     Album(String),
     Artist(String),
     SavedTracks,
+    // A "song radio" station, seeded from a track. `seed_id` is the seed track's
+    // base62 id (identity of the station, used for equality/navigation), and
+    // `seed_name` is a human label for the seed (e.g. the track title) used only
+    // for display (the "Playing from radio · <name>" header and the Radio screen).
+    Radio { seed_id: String, seed_name: String },
 }
 
 impl PartialEq for SongsSource {
@@ -27,6 +32,12 @@ impl PartialEq for SongsSource {
             (Self::Album(l), Self::Album(r)) => l == r,
             (Self::Artist(l), Self::Artist(r)) => l == r,
             (Self::SavedTracks, Self::SavedTracks) => true,
+            // Two radio stations are the same iff they share the same seed track;
+            // the display name is not part of identity.
+            (
+                Self::Radio { seed_id: l, .. },
+                Self::Radio { seed_id: r, .. },
+            ) => l == r,
             _ => false,
         }
     }
@@ -43,6 +54,18 @@ impl SongsSource {
         match self {
             Self::Playlist(id) => Some(format!("spotify:playlist:{}", id)),
             Self::Album(id) => Some(format!("spotify:album:{}", id)),
+            _ => None,
+        }
+    }
+
+    /// A human display name for the source, when the source itself carries one
+    /// (Liked Songs, Radio). Playlist/album/artist names are not stored on the
+    /// source (only ids), so those return None and the caller resolves the name
+    /// from browser state (falling back to the type label).
+    pub fn intrinsic_name(&self) -> Option<String> {
+        match self {
+            Self::SavedTracks => Some("Liked Songs".to_string()),
+            Self::Radio { seed_name, .. } => Some(seed_name.clone()),
             _ => None,
         }
     }
@@ -74,8 +97,11 @@ impl BatchLoader {
         let Batch {
             offset, batch_size, ..
         } = query.batch;
-        if matches!(&query.source, SongsSource::Artist(_)) {
-            error!("Artist top tracks are not paginated and should not be batch-loaded");
+        if matches!(
+            &query.source,
+            SongsSource::Artist(_) | SongsSource::Radio { .. }
+        ) {
+            error!("Artist top tracks / radio stations are not paginated and should not be batch-loaded");
             return None;
         }
 
@@ -83,7 +109,7 @@ impl BatchLoader {
             SongsSource::Playlist(id) => api.get_playlist_tracks(id, offset, batch_size),
             SongsSource::SavedTracks => api.get_saved_tracks(offset, batch_size),
             SongsSource::Album(id) => api.get_album_tracks(id, offset, batch_size),
-            SongsSource::Artist(_) => unreachable!(),
+            SongsSource::Artist(_) | SongsSource::Radio { .. } => unreachable!(),
         };
 
         let result = match do_fetch().await {

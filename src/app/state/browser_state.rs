@@ -1,6 +1,6 @@
 use super::{
-    AppAction, AppEvent, ArtistState, DetailsState, HomeState, PlaylistDetailsState, ScreenName,
-    SearchState, UpdatableState, UserState,
+    AppAction, AppEvent, ArtistState, DetailsState, HomeState, PlaylistDetailsState, RadioState,
+    ScreenName, SearchState, UpdatableState, UserState,
 };
 use crate::app::components::{CardLayout, CardSize, SortOrder};
 use crate::app::models::*;
@@ -51,6 +51,9 @@ pub enum BrowserAction {
     AppendUserPlaylists(String, Vec<PlaylistDescription>),
     SetSavedTracks(Box<SongBatch>),
     AppendSavedTracks(Box<SongBatch>),
+    /// Populate a Radio screen (keyed by seed track id) with the station tracks
+    /// resolved by the player thread. Seed first, then the similar tracks.
+    SetRadioTracks(String, Vec<SongDescription>),
     SaveTracks(Vec<SongDescription>),
     RemoveSavedTracks(Vec<String>),
     SetSavedArtists(Vec<ArtistSummary>, Option<String>),
@@ -89,6 +92,8 @@ pub enum BrowserEvent {
     PlaylistDetailsLoaded(String),
     PlaylistTracksAppended(String),
     PlaylistTracksRemoved(String),
+    /// A Radio screen (keyed by seed track id) received its resolved tracks.
+    RadioTracksLoaded(String),
     SearchUpdated,
     SearchResultsUpdated,
     ArtistDetailsUpdated(String),
@@ -138,6 +143,7 @@ pub enum BrowserScreen {
     Artist(Box<ArtistState>),
     PlaylistDetails(Box<PlaylistDetailsState>),
     User(Box<UserState>),
+    Radio(Box<RadioState>),
     Stateless(Box<StatelessScreen>),
 }
 
@@ -156,6 +162,9 @@ impl BrowserScreen {
                 BrowserScreen::PlaylistDetails(Box::new(PlaylistDetailsState::new(id.to_string())))
             }
             ScreenName::User(id) => BrowserScreen::User(Box::new(UserState::new(id.to_string()))),
+            ScreenName::Radio { seed_id, seed_name } => BrowserScreen::Radio(Box::new(
+                RadioState::new(seed_id.to_string(), seed_name.to_string()),
+            )),
             ScreenName::SavedTracks | ScreenName::Settings => {
                 BrowserScreen::Stateless(Box::new(StatelessScreen { name: name.clone() }))
             }
@@ -171,6 +180,7 @@ impl BrowserScreen {
             Self::Artist(state) => &mut **state,
             Self::PlaylistDetails(state) => &mut **state,
             Self::User(state) => &mut **state,
+            Self::Radio(state) => &mut **state,
             Self::Stateless(state) => &mut **state,
         }
     }
@@ -187,6 +197,7 @@ impl NamedScreen for BrowserScreen {
             Self::Artist(state) => &state.name,
             Self::PlaylistDetails(state) => &state.name,
             Self::User(state) => &state.name,
+            Self::Radio(state) => &state.name,
             Self::Stateless(state) => &state.name,
         }
     }
@@ -349,6 +360,10 @@ impl BrowserState {
 
     pub fn user_state(&self, id: &str) -> Option<&UserState> {
         extract_state!(self, BrowserScreen::User(state) if state.id == id => state)
+    }
+
+    pub fn radio_state(&self, seed_id: &str) -> Option<&RadioState> {
+        extract_state!(self, BrowserScreen::Radio(state) if state.seed_id == seed_id => state)
     }
 
     // If a screen we want to push is already in the stack

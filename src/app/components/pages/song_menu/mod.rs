@@ -57,38 +57,6 @@ impl SongMenuModel {
             });
     }
 
-    // Load a resolved radio station into playback. The station songs arrive
-    // ALREADY fully hydrated from the player thread (metadata comes from
-    // librespot's internal API, because the Web API 403s for this dev-mode app),
-    // so this side just loads them as the queue and starts on the seed. Replaces
-    // the current queue/context, matching Spotify's "Start radio".
-    // `PlaybackAction::LoadSongs` is deprecated but remains the correct path for a
-    // flat, non-paged station list (it replaces the queue and emits SourceChanged).
-    #[allow(deprecated)]
-    fn load_radio(&self, seed_id: String, songs: Vec<SongDescription>) {
-        if songs.is_empty() {
-            self.dispatcher
-                .dispatch(AppAction::ShowNotification(gettext(
-                    // translators: shown when a song radio station could not be built.
-                    "Could not start radio for this song.",
-                )));
-            return;
-        }
-
-        // The first song to play: prefer the seed if it hydrated, else the first
-        // available track (the player thread already puts the seed first).
-        let first_id = songs
-            .iter()
-            .find(|s| s.id == seed_id)
-            .map(|s| s.id.clone())
-            .unwrap_or_else(|| songs[0].id.clone());
-
-        // Replace the queue with the whole station, then start on the seed.
-        self.dispatcher
-            .dispatch(AppAction::PlaybackAction(PlaybackAction::LoadSongs(songs)));
-        self.dispatcher
-            .dispatch(AppAction::PlaybackAction(PlaybackAction::Load(first_id)));
-    }
 }
 
 pub struct SongMenu {
@@ -181,8 +149,10 @@ impl SongMenu {
             },
         ));
 
-        // Start radio — build a station seeded from this song and start playing it,
-        // replacing the current queue (like Spotify's "Start radio").
+        // Go to radio — resolve a station seeded from this song and open it as a
+        // browsable page (like a playlist), WITHOUT auto-playing. Playback starts
+        // only when the user taps a track in that Radio screen. The resolve →
+        // push + populate is handled in the reducer (StartRadioResolved).
         let sheet = self.sheet.clone();
         let model_r = self.model.clone();
         let seed_id = song.id.clone();
@@ -192,7 +162,7 @@ impl SongMenu {
         // is confirmed to ship in adwaita-icon-theme.
         actions_box.append(&action_row(
             "network-cellular-signal-excellent-symbolic",
-            &gettext("Start radio"),
+            &gettext("Go to radio"),
             move || {
                 set_sheet_open(&sheet, false);
                 model_r
@@ -382,8 +352,10 @@ impl EventListener for SongMenu {
                     }
                 }
             }
-            AppEvent::RadioResolved { seed_id, songs } => {
-                self.model.load_radio(seed_id.clone(), songs.clone());
+            AppEvent::RadioResolved { .. } => {
+                // The reducer already pushed + populated the browsable Radio
+                // screen; just make sure this menu sheet is closed.
+                set_sheet_open(&self.sheet, false);
             }
             _ => {}
         }

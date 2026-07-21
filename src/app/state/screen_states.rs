@@ -20,6 +20,10 @@ pub enum ScreenName {
     User(String),
     SavedTracks,
     Settings,
+    // A "song radio" station screen, keyed by the seed track's base62 id. Carries
+    // the seed's display name too so the screen can render its title without any
+    // extra lookups (the tracks are handed in from the player thread, not fetched).
+    Radio { seed_id: String, seed_name: String },
 }
 
 impl ScreenName {
@@ -33,6 +37,9 @@ impl ScreenName {
             Self::User(s) => Cow::Owned(format!("user_{s}")),
             Self::SavedTracks => Cow::Borrowed("saved_tracks"),
             Self::Settings => Cow::Borrowed("settings"),
+            // Identity is the seed id only (matches SongsSource::Radio equality),
+            // so re-opening radio for the same seed navigates back to the same screen.
+            Self::Radio { seed_id, .. } => Cow::Owned(format!("radio_{seed_id}")),
         }
     }
 }
@@ -175,6 +182,61 @@ impl UpdatableState for PlaylistDetailsState {
             }
             BrowserAction::UnsavePlaylist(id) if id == &self.id => {
                 vec![BrowserEvent::PlaylistUnsaved(self.id.clone())]
+            }
+            _ => vec![],
+        }
+    }
+}
+
+// A "song radio" station screen. Unlike the other detail screens, its tracks are
+// NOT fetched from the Web API here — they are resolved on the player thread
+// (librespot internal API) and handed in via `SetRadioTracks`. This state just
+// holds the resolved list plus the seed's identity/name for the header.
+pub struct RadioState {
+    pub seed_id: String,
+    pub seed_name: String,
+    pub name: ScreenName,
+    // Populated once, wholesale, from the resolved station (seed first, then the
+    // similar tracks). Not paginated.
+    pub songs: SongListModel,
+    // Whether the resolved tracks have been stored yet (so the page can tell an
+    // empty-but-loaded station from a not-yet-resolved one).
+    pub loaded: bool,
+}
+
+impl RadioState {
+    pub fn new(seed_id: String, seed_name: String) -> Self {
+        Self {
+            name: ScreenName::Radio {
+                seed_id: seed_id.clone(),
+                seed_name: seed_name.clone(),
+            },
+            seed_id,
+            seed_name,
+            songs: SongListModel::new(50),
+            loaded: false,
+        }
+    }
+}
+
+impl UpdatableState for RadioState {
+    type Action = BrowserAction;
+    type Event = BrowserEvent;
+
+    fn update_with(&mut self, action: Cow<Self::Action>) -> Vec<Self::Event> {
+        match action.as_ref() {
+            BrowserAction::SetRadioTracks(seed_id, songs) if seed_id == &self.seed_id => {
+                let batch = SongBatch {
+                    songs: songs.clone(),
+                    batch: Batch {
+                        offset: 0,
+                        batch_size: songs.len().max(1),
+                        total: songs.len(),
+                    },
+                };
+                self.songs.clear().and(move |s| s.add(batch)).commit();
+                self.loaded = true;
+                vec![BrowserEvent::RadioTracksLoaded(self.seed_id.clone())]
             }
             _ => vec![],
         }

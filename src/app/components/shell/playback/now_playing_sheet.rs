@@ -1,12 +1,13 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
+use gettextrs::gettext;
 use gtk::prelude::*;
 
 use crate::app::components::EventListener;
 use crate::app::models::{RepeatMode, SongDescription};
-use crate::app::state::{BrowserEvent, Device, PlaybackAction, PlaybackEvent};
-use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, Worker};
+use crate::app::state::{BrowserAction, BrowserEvent, Device, PlaybackAction, PlaybackEvent, ScreenName};
+use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, SongsSource, Worker};
 
 use super::now_playing_full::NowPlayingFullWidget;
 
@@ -101,6 +102,88 @@ impl NowPlayingSheetModel {
             self.dispatcher.dispatch(AppAction::ShowAddToPlaylist(song));
         }
     }
+
+    /// The "PLAYING FROM <TYPE>" / "<name>" pair for the current playback source,
+    /// or None when there is no meaningful navigable source (nothing playing, or
+    /// an ad-hoc queue with no context). The type label is translated here; the
+    /// name is the source's own name where it carries one (Liked Songs, Radio),
+    /// otherwise resolved from the matching detail screen in browser state, with
+    /// the type label as a final fallback.
+    fn source_display(&self) -> Option<(String, String)> {
+        let state = self.state();
+        let source = state.playback.current_source()?;
+
+        // Only show the header while something is actually playing.
+        if state.playback.current_song().is_none() {
+            return None;
+        }
+
+        let type_label = translate_source_type(source);
+
+        let name = source.intrinsic_name().or_else(|| match source {
+            SongsSource::Album(id) => state
+                .browser
+                .details_state(id)
+                .and_then(|s| s.content.as_ref())
+                .map(|c| c.description.title.clone()),
+            SongsSource::Playlist(id) => state
+                .browser
+                .playlist_details_state(id)
+                .and_then(|s| s.playlist.as_ref())
+                .map(|p| p.title.clone()),
+            SongsSource::Artist(id) => state
+                .browser
+                .artist_state(id)
+                .and_then(|s| s.artist.clone()),
+            _ => None,
+        });
+
+        // Fall back to the (title-cased-ish) type label when the name is unknown.
+        let name = name.unwrap_or_else(|| type_label.clone());
+        Some((type_label, name))
+    }
+
+    /// Navigate to the current playback source (open its playlist/album/artist/
+    /// Liked Songs/Radio screen), mirroring Spotify's tappable "Playing from X".
+    /// Returns true when a navigation was dispatched (the caller then closes the
+    /// now-playing sheet).
+    fn navigate_to_source(&self) -> bool {
+        let action = {
+            let state = self.state();
+            let Some(source) = state.playback.current_source() else {
+                return false;
+            };
+            match source {
+                SongsSource::Album(id) => AppAction::ViewAlbum(id.clone()),
+                SongsSource::Playlist(id) => AppAction::ViewPlaylist(id.clone()),
+                SongsSource::Artist(id) => AppAction::ViewArtist(id.clone()),
+                SongsSource::SavedTracks => {
+                    BrowserAction::NavigationPush(ScreenName::SavedTracks).into()
+                }
+                SongsSource::Radio { seed_id, seed_name } => {
+                    BrowserAction::NavigationPush(ScreenName::Radio {
+                        seed_id: seed_id.clone(),
+                        seed_name: seed_name.clone(),
+                    })
+                    .into()
+                }
+            }
+        };
+        self.dispatcher.dispatch(action);
+        true
+    }
+}
+
+/// Translate the source's stable English type key for the "PLAYING FROM <TYPE>"
+/// caption.
+fn translate_source_type(source: &SongsSource) -> String {
+    match source {
+        SongsSource::Playlist(_) => gettext("PLAYLIST"),
+        SongsSource::Album(_) => gettext("ALBUM"),
+        SongsSource::Artist(_) => gettext("ARTIST"),
+        SongsSource::SavedTracks => gettext("LIKED SONGS"),
+        SongsSource::Radio { .. } => gettext("RADIO"),
+    }
 }
 
 pub struct NowPlayingSheet {
@@ -169,6 +252,19 @@ impl NowPlayingSheet {
             sheet,
             move || set_sheet_open(&sheet, false)
         ));
+        // Tapping "Playing from <source>" navigates to that source and closes the
+        // now-playing sheet — exactly like Spotify.
+        widget.connect_source(clone!(
+            #[weak]
+            model,
+            #[weak]
+            sheet,
+            move || {
+                if model.navigate_to_source() {
+                    set_sheet_open(&sheet, false);
+                }
+            }
+        ));
 
         Self {
             model,
@@ -200,6 +296,18 @@ impl NowPlayingSheet {
         self.update_current_info();
         self.widget.set_seek_position(self.last_position as f64);
         self.update_playing_on();
+        self.update_source();
+    }
+
+    // Reflect the current playback source in the tappable "Playing from" header,
+    // hiding it when there's no navigable source.
+    fn update_source(&self) {
+        match self.model.source_display() {
+            Some((type_label, name)) => self
+                .widget
+                .set_source(Some((type_label.as_str(), name.as_str()))),
+            None => self.widget.set_source(None),
+        }
     }
 
     // Reflect the active device in the "Playing on <device>" label — the remote
@@ -228,10 +336,15 @@ impl EventListener for NowPlayingSheet {
                 self.widget.set_playing(self.model.is_playing());
                 self.widget.set_liked(self.model.is_current_song_liked());
                 self.update_current_info();
+                self.update_source();
+            }
+            AppEvent::PlaybackEvent(PlaybackEvent::SourceChanged) => {
+                self.update_source();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::PlaybackStopped) => {
                 self.widget.set_playing(self.model.is_playing());
                 self.update_current_info();
+                self.update_source();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::SeekSynced(pos))
             | AppEvent::PlaybackEvent(PlaybackEvent::TrackSeeked(pos)) => {
