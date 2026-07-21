@@ -56,6 +56,10 @@ pub enum AppAction {
         seed_id: String,
         songs: Vec<crate::app::models::SongDescription>,
     },
+    /// Force an immediate re-poll of remote playback (mirror direction), used
+    /// after issuing a transport control to a mirrored remote device so the UI
+    /// reflects the change without waiting for the next poll tick.
+    RepollRemoteMirror,
     /// Open the library long-press context drawer for the given item.
     ShowLibraryItemMenu(crate::app::models::LibraryItem),
     /// The local pin set changed (pin/unpin from the library drawer); the library
@@ -144,6 +148,9 @@ pub enum AppEvent {
     LibraryPinsChanged,
     SearchTabShown,
     SettingsEvent(SettingsEvent),
+    /// A re-poll of remote playback was requested (after a remote transport
+    /// control). The player notifier nudges the connect mirror poll.
+    RemoteMirrorRepollRequested,
 }
 
 // The actual state, split five-ways
@@ -178,6 +185,7 @@ impl AppState {
             // they're here just to have a consistent way of doing things (always an Action)
             AppAction::ShowNotification(c) => vec![AppEvent::NotificationShown(c)],
             AppAction::ShowNowPlayingSheet => vec![AppEvent::NowPlayingSheetShown],
+            AppAction::RepollRemoteMirror => vec![AppEvent::RemoteMirrorRepollRequested],
             AppAction::ShowAddToPlaylist(song) => vec![AppEvent::AddToPlaylistShown(song)],
             AppAction::ShowSongMenu(song) => vec![AppEvent::SongMenuShown(song)],
             AppAction::StartRadio(seed_id) => vec![AppEvent::RadioRequested(seed_id)],

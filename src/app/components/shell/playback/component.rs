@@ -72,21 +72,39 @@ impl PlaybackModel {
 
     // Run a transport call against the mirrored remote device via the Web API,
     // then optimistically update the mirrored snapshot so the UI reacts instantly
-    // (the ~4s poll will reconcile). `update` mutates the local snapshot copy.
-    fn remote_control<F>(&self, device_id: String, call: F, updated: Option<RemotePlayback>)
-    where
+    // and request an immediate re-poll so the real state reconciles fast (rather
+    // than waiting for the next ~4s tick). `endpoint` labels the call for logging.
+    fn remote_control<F>(
+        &self,
+        endpoint: &'static str,
+        device_id: String,
+        call: F,
+        updated: Option<RemotePlayback>,
+    ) where
         F: std::future::Future<Output = crate::api::SpotifyResult<()>> + Send + 'static,
     {
-        eprintln!("RIFF_CONNECT: mini-player driving remote device={device_id}");
+        eprintln!(
+            "RIFF_CONNECT: mini-player -> remote control endpoint={endpoint} device={device_id}"
+        );
         if let Some(snapshot) = updated {
             self.dispatcher
                 .dispatch(PlaybackAction::SetRemotePlayback(Some(snapshot)).into());
         }
         self.dispatcher.dispatch_async(Box::pin(async move {
-            if let Err(err) = call.await {
-                error!("remote transport failed: {}", err);
+            match call.await {
+                Ok(()) => eprintln!(
+                    "RIFF_CONNECT: remote control ok endpoint={endpoint} device={device_id}"
+                ),
+                Err(err) => {
+                    eprintln!(
+                        "RIFF_CONNECT: remote control FAILED endpoint={endpoint} device={device_id}: {err}"
+                    );
+                    error!("remote transport failed: {}", err);
+                }
             }
-            None
+            // Nudge an immediate re-poll so the mirrored snapshot catches up
+            // (rather than waiting for the next ~4s poll tick).
+            Some(AppAction::RepollRemoteMirror)
         }));
     }
 
@@ -95,7 +113,7 @@ impl PlaybackModel {
             let api = self.app_model.get_spotify();
             let id = remote.device.id.clone();
             let call = { let id = id.clone(); async move { api.player_next(id).await } };
-            self.remote_control(id, call, None);
+            self.remote_control("next", id, call, None);
             return;
         }
         self.dispatcher.dispatch(PlaybackAction::Next.into());
@@ -106,7 +124,7 @@ impl PlaybackModel {
             let api = self.app_model.get_spotify();
             let id = remote.device.id.clone();
             let call = { let id = id.clone(); async move { api.player_previous(id).await } };
-            self.remote_control(id, call, None);
+            self.remote_control("previous", id, call, None);
             return;
         }
         self.dispatcher.dispatch(PlaybackAction::Previous.into());
@@ -118,6 +136,7 @@ impl PlaybackModel {
             let id = remote.device.id.clone();
             let was_playing = remote.is_playing;
             remote.is_playing = !was_playing; // optimistic
+            let endpoint = if was_playing { "pause" } else { "play" };
             let call = {
                 let id = id.clone();
                 async move {
@@ -128,7 +147,7 @@ impl PlaybackModel {
                     }
                 }
             };
-            self.remote_control(id, call, Some(remote));
+            self.remote_control(endpoint, id, call, Some(remote));
             return;
         }
         self.dispatcher.dispatch(PlaybackAction::TogglePlay.into());
@@ -153,7 +172,7 @@ impl PlaybackModel {
             let pos = position as usize;
             remote.progress_ms = position; // optimistic
             let call = { let id = id.clone(); async move { api.player_seek(id, pos).await } };
-            self.remote_control(id, call, Some(remote));
+            self.remote_control("seek", id, call, Some(remote));
             return;
         }
         self.dispatcher
@@ -166,7 +185,7 @@ impl PlaybackModel {
             let id = remote.device.id.clone();
             let vol = (value * 100f64).trunc() as u8;
             let call = { let id = id.clone(); async move { api.player_volume(id, vol).await } };
-            self.remote_control(id, call, None);
+            self.remote_control("volume", id, call, None);
             return;
         }
         self.dispatcher

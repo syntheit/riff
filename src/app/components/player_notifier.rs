@@ -128,6 +128,15 @@ impl PlayerNotifier {
         self.app_model.get_state().playback.is_playing()
     }
 
+    // Whether riff owns an active LOCAL session (played something locally, still
+    // "sticky" across pause/resume). Gates the mirror instead of raw play-state.
+    fn local_session_active(&self) -> bool {
+        self.app_model
+            .get_state()
+            .playback
+            .local_session_active()
+    }
+
     fn currently_playing(&self) -> Option<CurrentlyPlaying> {
         let state = self.app_model.get_state();
         let song = state.playback.current_song_id()?;
@@ -268,11 +277,25 @@ impl PlayerNotifier {
     }
 
     // Decide + push the mirror state from current app state: active only when the
-    // active device is Local and riff isn't playing locally.
+    // active device is Local and riff does NOT own a local session. Gating on the
+    // sticky `local_session_active` (rather than raw play-state) is what stops a
+    // local PAUSE from re-enabling the mirror and yanking the user back to the
+    // desktop. When a local session is active the mirror poll idles (battery).
     fn refresh_remote_mirror(&self) {
         let is_local = matches!(&*self.device(), Device::Local);
-        let active = is_local && !self.is_playing();
+        let active = is_local && !self.local_session_active();
         self.set_remote_mirror(active);
+    }
+
+    // Force an immediate re-poll of remote playback (without changing the mirror
+    // decision), so a remote CONTROL press (play/pause/next/seek/volume issued at
+    // a mirrored device) is reflected in the UI right away instead of waiting for
+    // the next poll tick. Re-uses the `SetRemoteMirrorActive(true)` nudge, which
+    // polls once immediately. Only meaningful while actually mirroring.
+    fn repoll_remote_mirror(&self) {
+        if self.app_model.get_state().playback.is_mirroring_remote() {
+            self.set_remote_mirror(true);
+        }
     }
 
     fn send_command_to_local_player(&self, command: Command) {
@@ -343,6 +366,9 @@ impl EventListener for PlayerNotifier {
                 });
             }
             (_, AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(d))) => self.switch_device(d),
+            // A transport control was issued to a mirrored remote device: re-poll
+            // now so the mirrored snapshot catches up immediately.
+            (_, AppEvent::RemoteMirrorRepollRequested) => self.repoll_remote_mirror(),
             // Startup + whenever the now-playing sheet opens: (re)evaluate whether
             // to mirror remote playback, and poll it immediately.
             (_, AppEvent::Started) | (_, AppEvent::NowPlayingSheetShown) => {

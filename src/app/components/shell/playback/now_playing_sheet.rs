@@ -5,7 +5,7 @@ use gettextrs::gettext;
 use gtk::prelude::*;
 
 use crate::app::components::EventListener;
-use crate::app::models::{RepeatMode, SongDescription};
+use crate::app::models::{RemotePlayback, RepeatMode, SongDescription};
 use crate::app::state::{BrowserAction, BrowserEvent, PlaybackAction, PlaybackEvent, ScreenName};
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, AppState, SongsSource, Worker};
 
@@ -34,15 +34,94 @@ impl NowPlayingSheetModel {
         self.app_model.get_state()
     }
 
+    // The remote device we're currently mirroring, if the full player is in
+    // remote-mirror mode. Transport presses drive THIS device via the Web API
+    // directly (same path as the mini-player), instead of the local queue.
+    fn mirrored_remote(&self) -> Option<RemotePlayback> {
+        let state = self.state();
+        if !state.playback.is_mirroring_remote() {
+            return None;
+        }
+        state.playback.remote_playback().cloned()
+    }
+
+    // Run a transport call against the mirrored remote device via the Web API,
+    // optimistically update the mirrored snapshot for instant UI feedback, then
+    // request an immediate re-poll to reconcile. `endpoint` labels the call.
+    fn remote_control<F>(
+        &self,
+        endpoint: &'static str,
+        device_id: String,
+        call: F,
+        updated: Option<RemotePlayback>,
+    ) where
+        F: std::future::Future<Output = crate::api::SpotifyResult<()>> + Send + 'static,
+    {
+        eprintln!(
+            "RIFF_CONNECT: now-playing -> remote control endpoint={endpoint} device={device_id}"
+        );
+        if let Some(snapshot) = updated {
+            self.dispatcher
+                .dispatch(PlaybackAction::SetRemotePlayback(Some(snapshot)).into());
+        }
+        self.dispatcher.dispatch_async(Box::pin(async move {
+            match call.await {
+                Ok(()) => eprintln!(
+                    "RIFF_CONNECT: remote control ok endpoint={endpoint} device={device_id}"
+                ),
+                Err(err) => {
+                    eprintln!(
+                        "RIFF_CONNECT: remote control FAILED endpoint={endpoint} device={device_id}: {err}"
+                    );
+                    error!("remote transport failed: {}", err);
+                }
+            }
+            Some(AppAction::RepollRemoteMirror)
+        }));
+    }
+
     fn toggle_playback(&self) {
+        if let Some(mut remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let was_playing = remote.is_playing;
+            remote.is_playing = !was_playing; // optimistic
+            let endpoint = if was_playing { "pause" } else { "play" };
+            let call = {
+                let id = id.clone();
+                async move {
+                    if was_playing {
+                        api.player_pause(id).await
+                    } else {
+                        api.player_resume(id).await
+                    }
+                }
+            };
+            self.remote_control(endpoint, id, call, Some(remote));
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::TogglePlay.into());
     }
 
     fn play_next(&self) {
+        if let Some(remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let call = { let id = id.clone(); async move { api.player_next(id).await } };
+            self.remote_control("next", id, call, None);
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::Next.into());
     }
 
     fn play_prev(&self) {
+        if let Some(remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let call = { let id = id.clone(); async move { api.player_previous(id).await } };
+            self.remote_control("previous", id, call, None);
+            return;
+        }
         self.dispatcher.dispatch(PlaybackAction::Previous.into());
     }
 
@@ -57,6 +136,15 @@ impl NowPlayingSheetModel {
     }
 
     fn seek_to(&self, position: u32) {
+        if let Some(mut remote) = self.mirrored_remote() {
+            let api = self.app_model.get_spotify();
+            let id = remote.device.id.clone();
+            let pos = position as usize;
+            remote.progress_ms = position; // optimistic
+            let call = { let id = id.clone(); async move { api.player_seek(id, pos).await } };
+            self.remote_control("seek", id, call, Some(remote));
+            return;
+        }
         self.dispatcher
             .dispatch(PlaybackAction::Seek(position).into());
     }
