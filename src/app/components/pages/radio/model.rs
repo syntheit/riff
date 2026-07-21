@@ -97,7 +97,8 @@ impl PageModel for RadioModel {
         // the first available track, then to the broadcast `default_icon`.
         let songs = PlaylistModel::song_list_model(self);
         let seed = songs.get(&self.id).or_else(|| songs.index(0))?;
-        seed.description().art.clone()
+        let art = seed.description().art.clone();
+        art
     }
 
     fn header_image_shape(&self) -> HeaderImageShape {
