@@ -57,45 +57,37 @@ impl SongMenuModel {
             });
     }
 
-    // Hydrate a resolved radio station (seed + similar track ids) into full song
-    // metadata via the Web API, then load it as the playback queue and start on
-    // the seed. Replaces the current queue/context, matching Spotify's "Start
-    // radio". Runs on the GLib worker (Web API), off the player thread that did
-    // the resolve.
+    // Load a resolved radio station into playback. The station songs arrive
+    // ALREADY fully hydrated from the player thread (metadata comes from
+    // librespot's internal API, because the Web API 403s for this dev-mode app),
+    // so this side just loads them as the queue and starts on the seed. Replaces
+    // the current queue/context, matching Spotify's "Start radio".
     // `PlaybackAction::LoadSongs` is deprecated but remains the correct path for a
     // flat, non-paged station list (it replaces the queue and emits SourceChanged).
     #[allow(deprecated)]
-    fn load_radio(&self, seed_id: String, track_ids: Vec<String>) {
-        let api = self.app_model.get_spotify();
-        // Seed plays first, then the similar tracks (order preserved by get_tracks).
-        let mut ids = Vec::with_capacity(track_ids.len() + 1);
-        ids.push(seed_id.clone());
-        ids.extend(track_ids);
+    fn load_radio(&self, seed_id: String, songs: Vec<SongDescription>) {
+        if songs.is_empty() {
+            self.dispatcher
+                .dispatch(AppAction::ShowNotification(gettext(
+                    // translators: shown when a song radio station could not be built.
+                    "Could not start radio for this song.",
+                )));
+            return;
+        }
 
+        // The first song to play: prefer the seed if it hydrated, else the first
+        // available track (the player thread already puts the seed first).
+        let first_id = songs
+            .iter()
+            .find(|s| s.id == seed_id)
+            .map(|s| s.id.clone())
+            .unwrap_or_else(|| songs[0].id.clone());
+
+        // Replace the queue with the whole station, then start on the seed.
         self.dispatcher
-            .call_spotify_and_dispatch_many(move || async move {
-                let songs = api.get_tracks(ids).await?;
-                eprintln!("RIFF_RADIO: hydrated {} radio track(s)", songs.len());
-                if songs.is_empty() {
-                    return Ok(vec![AppAction::ShowNotification(gettext(
-                        // translators: shown when a song radio station could not be built.
-                        "Could not start radio for this song.",
-                    ))]);
-                }
-                // The first song to play: prefer the seed if it hydrated, else the
-                // first available track.
-                let first_id = songs
-                    .iter()
-                    .find(|s| s.id == seed_id)
-                    .map(|s| s.id.clone())
-                    .unwrap_or_else(|| songs[0].id.clone());
-                Ok(vec![
-                    // Replace the queue with the whole station...
-                    AppAction::PlaybackAction(PlaybackAction::LoadSongs(songs)),
-                    // ...then start playback on the seed track.
-                    AppAction::PlaybackAction(PlaybackAction::Load(first_id)),
-                ])
-            });
+            .dispatch(AppAction::PlaybackAction(PlaybackAction::LoadSongs(songs)));
+        self.dispatcher
+            .dispatch(AppAction::PlaybackAction(PlaybackAction::Load(first_id)));
     }
 }
 
@@ -194,8 +186,12 @@ impl SongMenu {
         let sheet = self.sheet.clone();
         let model_r = self.model.clone();
         let seed_id = song.id.clone();
+        // Radio/broadcast-appropriate icon. Adwaita's `radio-symbolic` family is
+        // the *radio-button* form control (a dot), not a broadcast glyph, so use
+        // the cellular-signal "waves" icon which reads as broadcast/airwaves and
+        // is confirmed to ship in adwaita-icon-theme.
         actions_box.append(&action_row(
-            "emblem-shared-symbolic",
+            "network-cellular-signal-excellent-symbolic",
             &gettext("Start radio"),
             move || {
                 set_sheet_open(&sheet, false);
@@ -386,11 +382,8 @@ impl EventListener for SongMenu {
                     }
                 }
             }
-            AppEvent::RadioResolved {
-                seed_id,
-                track_ids,
-            } => {
-                self.model.load_radio(seed_id.clone(), track_ids.clone());
+            AppEvent::RadioResolved { seed_id, songs } => {
+                self.model.load_radio(seed_id.clone(), songs.clone());
             }
             _ => {}
         }

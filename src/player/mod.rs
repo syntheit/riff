@@ -3,6 +3,7 @@ use librespot::core::SpotifyUri;
 use tokio::task;
 use url::Url;
 
+use crate::app::models::SongDescription;
 use crate::app::state::{LoginAction, PlaybackAction};
 use crate::app::AppAction;
 use crate::auth::TokenStore;
@@ -24,9 +25,11 @@ pub enum Command {
     PlayerSeek(u32),
     PlayerSetVolume(f64),
     PlayerPreload(SpotifyUri),
-    // Resolve a "song radio" station seeded from a track (base62 id) via the
-    // librespot session's internal radio endpoint, then report the resulting
-    // track ids back to the app for metadata hydration + queue loading.
+    // Resolve a "song radio" station seeded from a track (base62 id) entirely
+    // through the librespot session: get station track ids via the internal
+    // radio-apollo endpoint, then hydrate each track's metadata via the internal
+    // metadata API, and report the finished songs back to the app. The Web API is
+    // never touched (it 403s for this dev-mode app).
     StartRadio { seed_id: String },
     ReloadSettings,
     SetEqualizer { bands: [f64; 10] },
@@ -54,13 +57,12 @@ impl AppPlayerDelegate {
     }
 
     // Report a resolved radio station back to the app: the seed track id plus the
-    // similar-track ids returned by the librespot radio endpoint. The app then
-    // hydrates metadata (Web API /v1/tracks) and loads the queue.
-    fn radio_resolved(&self, seed_id: String, track_ids: Vec<String>) {
-        self.send(AppAction::StartRadioResolved {
-            seed_id,
-            track_ids,
-        })
+    // fully-hydrated station songs (seed first, then the similar tracks). Metadata
+    // is fetched on the player thread via librespot's internal metadata API,
+    // because the Web API /v1/tracks endpoint 403s for this dev-mode app. The app
+    // side then just loads these songs into the queue.
+    fn radio_resolved(&self, seed_id: String, songs: Vec<SongDescription>) {
+        self.send(AppAction::StartRadioResolved { seed_id, songs })
     }
 
     fn token_login_successful(&self, username: String) {

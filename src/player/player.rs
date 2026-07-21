@@ -7,6 +7,7 @@ use librespot::core::config::SessionConfig;
 use librespot::core::session::Session;
 use librespot::core::spotify_id::SpotifyId;
 use librespot::core::SpotifyUri;
+use librespot::metadata::{Metadata, Track};
 
 use librespot::playback::mixer::softmixer::SoftMixer;
 use librespot::playback::mixer::{Mixer, MixerConfig};
@@ -18,7 +19,7 @@ use librespot::playback::config::{
 };
 use librespot::playback::player::{Player, PlayerEvent, PlayerEventChannel};
 
-use crate::app::models::RepeatMode;
+use crate::app::models::{AlbumRef, ArtistRef, ImageSet, RepeatMode, SongDescription};
 use crate::audio_engine::{
     CaptureSink, EqController, EqProcessor, MixController, MixProcessor, MonoController,
     MonoProcessor, PanController, PanProcessor, PitchController, PitchProcessor, ProcessorChain,
@@ -329,32 +330,47 @@ impl SpotifyPlayer {
                 Ok(())
             }
             Command::StartRadio { seed_id } => {
-                let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
-                let track_id =
-                    SpotifyId::from_base62(&seed_id).map_err(|_| SpotifyError::TechnicalError)?;
-                let seed_uri = SpotifyUri::Track { id: track_id };
+                let session = self
+                    .session
+                    .as_ref()
+                    .ok_or(SpotifyError::PlayerNotReady)?
+                    .clone();
 
-                // Song Radio via librespot's internal endpoint
-                // (/inspiredby-mix/v2/seed_to_playlist). The Web API
-                // /v1/recommendations is dead (404) for this dev-mode app, so this
-                // is the only working path. Returns raw JSON we parse for track uris.
-                match session.spclient().get_radio_for_track(&seed_uri).await {
-                    Ok(bytes) => {
-                        let track_ids = parse_radio_track_ids(&bytes, &seed_id);
-                        eprintln!(
-                            "RIFF_RADIO: resolved {} radio track(s) for seed {}",
-                            track_ids.len(),
-                            seed_id
-                        );
-                        // Even with 0 similar tracks, still report so the seed plays.
-                        self.delegate.radio_resolved(seed_id, track_ids);
-                        Ok(())
-                    }
-                    Err(e) => {
-                        eprintln!("RIFF_RADIO: get_radio_for_track failed: {e}");
-                        Err(SpotifyError::TechnicalError)
+                // Resolve the station's track ids AND hydrate their metadata
+                // entirely through the librespot session. The Web API path is dead
+                // for this dev-mode app: /v1/recommendations 404s, and both the
+                // editorial station playlist and /v1/tracks?ids= 403. librespot's
+                // internal endpoints use the account's full streaming access, so
+                // they work where the Web API refuses.
+                let seed_id_for_hydrate = seed_id.clone();
+                let radio_ids = resolve_radio_track_ids(&session, &seed_id).await;
+                eprintln!(
+                    "RIFF_RADIO: resolved {} radio track id(s) for seed {}",
+                    radio_ids.len(),
+                    seed_id
+                );
+
+                // Hydrate seed first, then the station tracks (dedup keeps the seed
+                // from repeating). Metadata comes from the internal metadata API.
+                let mut ids: Vec<String> = Vec::with_capacity(radio_ids.len() + 1);
+                ids.push(seed_id_for_hydrate.clone());
+                for id in radio_ids {
+                    if id != seed_id_for_hydrate {
+                        ids.push(id);
                     }
                 }
+
+                let songs = hydrate_radio_songs(&session, &ids).await;
+                eprintln!("RIFF_RADIO: hydrated {} radio song(s)", songs.len());
+
+                if songs.is_empty() {
+                    // Nothing hydrated at all (even the seed failed): surface a
+                    // gentle error rather than silently doing nothing.
+                    return Err(SpotifyError::TechnicalError);
+                }
+
+                self.delegate.radio_resolved(seed_id, songs);
+                Ok(())
             }
             Command::RefreshToken => {
                 let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
@@ -725,69 +741,285 @@ async fn player_setup_delegate(mut channel: PlayerEventChannel, delegate: AppPla
     }
 }
 
-/// Extract track base62 ids from a `get_radio_for_track` JSON response.
+/// Resolve a "song radio" station into a concrete list of base62 track ids,
+/// entirely through the librespot session (no Web API).
 ///
-/// The exact schema of the `/inspiredby-mix/v2/seed_to_playlist` payload is
-/// undocumented (no in-tree consumer in librespot), so rather than pinning a
-/// brittle struct we walk the whole JSON tree and pull the base62 id out of any
-/// `spotify:track:{id}` URI string we find, in document order, de-duplicated. The
-/// seed itself is dropped (it is prepended separately when the queue is built).
-/// A raw response is logged once on-device (RIFF_RADIO) so the schema can be
-/// confirmed and this can be tightened later if desired.
-fn parse_radio_track_ids(bytes: &[u8], seed_id: &str) -> Vec<String> {
-    let value: serde_json::Value = match serde_json::from_slice(bytes) {
-        Ok(v) => v,
-        Err(e) => {
-            let preview: String = String::from_utf8_lossy(bytes).chars().take(500).collect();
-            eprintln!("RIFF_RADIO: failed to parse radio JSON ({e}); raw head: {preview}");
-            return Vec::new();
+/// Strategy, in order:
+///  1. `get_apollo_station("tracks", "spotify:track:{seed}", …)` — the
+///     `/radio-apollo/v3/tracks/{ctx}` endpoint. librespot documents scopes
+///     "tracks"/"stations" as working, and this is the endpoint the desktop
+///     "Go to radio"/station contexts use. We walk the JSON for `spotify:track:`
+///     uris.
+///  2. If scope "tracks" yields nothing, retry with scope "stations".
+///  3. If the apollo response still contains no track uris but *does* reference a
+///     playlist/station/album context uri (the same way `get_radio_for_track`
+///     was observed to return only `spotify:playlist:37i9…`), resolve that
+///     context into tracks via `spclient().get_context(uri)` (typed `Context`
+///     protobuf, internal API — works where the Web API 403s) and walk its pages.
+///
+/// The seed id is NOT filtered here (the caller prepends the seed and dedups).
+/// The raw response head is logged (RIFF_RADIO) so the on-device schema can be
+/// confirmed and this can be tightened later.
+async fn resolve_radio_track_ids(session: &Session, seed_id: &str) -> Vec<String> {
+    let context_uri = format!("spotify:track:{seed_id}");
+
+    // (1)/(2): try the apollo station endpoint, scope "tracks" then "stations".
+    for scope in ["tracks", "stations"] {
+        match session
+            .spclient()
+            .get_apollo_station(scope, &context_uri, Some(50), Vec::new(), true)
+            .await
+        {
+            Ok(bytes) => {
+                let preview: String =
+                    String::from_utf8_lossy(&bytes).chars().take(800).collect();
+                eprintln!(
+                    "RIFF_RADIO: apollo scope={scope} raw head ({} bytes): {preview}",
+                    bytes.len()
+                );
+
+                let value: serde_json::Value = match serde_json::from_slice(&bytes) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("RIFF_RADIO: apollo scope={scope} JSON parse failed: {e}");
+                        continue;
+                    }
+                };
+
+                // (a) direct track uris in the station payload
+                let ids = collect_uri_ids(&value, "spotify:track:");
+                if !ids.is_empty() {
+                    eprintln!(
+                        "RIFF_RADIO: apollo scope={scope} yielded {} track uri(s)",
+                        ids.len()
+                    );
+                    return ids;
+                }
+
+                // (b) apollo returned only a context uri (playlist/station/album);
+                // resolve that context into tracks via the internal resolver.
+                if let Some(ctx_uri) = first_context_uri(&value) {
+                    eprintln!(
+                        "RIFF_RADIO: apollo scope={scope} returned context uri {ctx_uri}; resolving via get_context"
+                    );
+                    let ids = resolve_context_track_ids(session, &ctx_uri).await;
+                    if !ids.is_empty() {
+                        return ids;
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("RIFF_RADIO: get_apollo_station scope={scope} failed: {e}");
+            }
         }
-    };
-
-    let mut ids: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    collect_track_ids(&value, seed_id, &mut ids, &mut seen);
-
-    if ids.is_empty() {
-        // Nothing matched the expected shape: dump a bounded preview so the real
-        // schema can be inspected on-device.
-        let preview: String = String::from_utf8_lossy(bytes).chars().take(800).collect();
-        eprintln!("RIFF_RADIO: no track uris found in radio response; raw head: {preview}");
     }
 
+    eprintln!("RIFF_RADIO: no radio track ids resolved for seed {seed_id}");
+    Vec::new()
+}
+
+/// Resolve a context uri (playlist/station/album/…) into base62 track ids using
+/// librespot's internal context resolver (`/context-resolve/v1/{uri}`), which
+/// returns a typed `Context` protobuf. This is the librespot analog of the
+/// context_resolver in librespot-connect and works without the Web API.
+async fn resolve_context_track_ids(session: &Session, context_uri: &str) -> Vec<String> {
+    match session.spclient().get_context(context_uri).await {
+        Ok(ctx) => {
+            let mut ids: Vec<String> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for page in &ctx.pages {
+                for track in &page.tracks {
+                    // ContextTrack.uri is `Option<String>` (proto2 optional);
+                    // when present it is a `spotify:track:{id}` uri. Match
+                    // librespot's own field-access style (see connect's
+                    // state/context.rs: `ctx_track.uri.as_ref()`).
+                    let Some(uri) = track.uri.as_deref() else {
+                        continue;
+                    };
+                    if let Some(id) = uri.strip_prefix("spotify:track:") {
+                        let id = id.split(':').next().unwrap_or(id);
+                        if !id.is_empty() && seen.insert(id.to_string()) {
+                            ids.push(id.to_string());
+                        }
+                    }
+                }
+            }
+            eprintln!(
+                "RIFF_RADIO: get_context({context_uri}) yielded {} track id(s)",
+                ids.len()
+            );
+            ids
+        }
+        Err(e) => {
+            eprintln!("RIFF_RADIO: get_context({context_uri}) failed: {e}");
+            Vec::new()
+        }
+    }
+}
+
+/// Hydrate full metadata for a list of base62 track ids via librespot's internal
+/// metadata API (`Track::get`), converting each into a riff `SongDescription`.
+/// Order is preserved. Tracks that fail to parse/fetch are skipped (logged).
+async fn hydrate_radio_songs(session: &Session, ids: &[String]) -> Vec<SongDescription> {
+    let mut songs = Vec::with_capacity(ids.len());
+    for id in ids {
+        let spotify_id = match SpotifyId::from_base62(id) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("RIFF_RADIO: bad track id {id}: {e}");
+                continue;
+            }
+        };
+        let uri = SpotifyUri::Track { id: spotify_id };
+        match Track::get(session, &uri).await {
+            Ok(track) => match song_from_track(&track) {
+                Some(song) => songs.push(song),
+                None => eprintln!("RIFF_RADIO: could not build SongDescription for {id}"),
+            },
+            Err(e) => {
+                eprintln!("RIFF_RADIO: metadata fetch failed for {id}: {e}");
+            }
+        }
+    }
+    songs
+}
+
+/// Build a riff `SongDescription` from a librespot metadata `Track`.
+///
+/// All ids (track/album/artist) come back from librespot as `SpotifyUri`; riff
+/// stores base62 id strings, so we convert via `to_base62`. Cover art file ids
+/// are mapped to the Spotify image CDN (`https://i.scdn.co/image/{hex}`), the
+/// same URL shape the Web API returns and that riff's ImageLoader already
+/// fetches.
+fn song_from_track(track: &Track) -> Option<SongDescription> {
+    let id = track.id.to_id().ok()?;
+    let uri = track.id.to_uri().ok()?;
+
+    let artists: Vec<ArtistRef> = track
+        .artists
+        .iter()
+        .filter_map(|a| {
+            Some(ArtistRef {
+                id: a.id.to_id().ok()?,
+                name: a.name.clone(),
+            })
+        })
+        .collect();
+
+    let album = AlbumRef {
+        id: track.album.id.to_id().unwrap_or_default(),
+        name: track.album.name.clone(),
+    };
+
+    // Album cover images: librespot gives file ids + width/height. Prefer the
+    // `covers` group (falling back to `cover_group`), map each to a CDN url.
+    let cover_images = if !track.album.covers.is_empty() {
+        &track.album.covers
+    } else {
+        &track.album.cover_group
+    };
+    let art = ImageSet::from_images(cover_images.iter().filter_map(|img| {
+        let hex = img.id.to_base16().ok()?;
+        let width = if img.width > 0 {
+            Some(img.width as u32)
+        } else {
+            None
+        };
+        Some((width, format!("https://i.scdn.co/image/{hex}")))
+    }));
+
+    Some(SongDescription {
+        id,
+        track_number: if track.number > 0 {
+            Some(track.number as u32)
+        } else {
+            None
+        },
+        uri,
+        title: track.name.clone(),
+        artists,
+        album,
+        duration_ms: track.duration.max(0) as u32,
+        art,
+    })
+}
+
+/// Recursively walk a JSON value collecting base62 ids from any string of the
+/// form `{prefix}{id}` (e.g. `spotify:track:{id}`), in document order, dedup'd.
+fn collect_uri_ids(value: &serde_json::Value, prefix: &str) -> Vec<String> {
+    fn walk(
+        value: &serde_json::Value,
+        prefix: &str,
+        ids: &mut Vec<String>,
+        seen: &mut std::collections::HashSet<String>,
+    ) {
+        match value {
+            serde_json::Value::String(s) => {
+                if let Some(rest) = s.strip_prefix(prefix) {
+                    // Guard against `{prefix}{id}:...` variants: take the id segment.
+                    let id = rest.split(':').next().unwrap_or(rest);
+                    if !id.is_empty() && seen.insert(id.to_string()) {
+                        ids.push(id.to_string());
+                    }
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for v in arr {
+                    walk(v, prefix, ids, seen);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for v in map.values() {
+                    walk(v, prefix, ids, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut ids = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    walk(value, prefix, &mut ids, &mut seen);
     ids
 }
 
-/// Recursively walk a JSON value collecting base62 ids from `spotify:track:{id}`
-/// URI strings (in any `uri`/`link`/string position). Skips the seed and dupes.
-fn collect_track_ids(
-    value: &serde_json::Value,
-    seed_id: &str,
-    ids: &mut Vec<String>,
-    seen: &mut std::collections::HashSet<String>,
-) {
-    match value {
-        serde_json::Value::String(s) => {
-            if let Some(id) = s.strip_prefix("spotify:track:") {
-                // Guard against `spotify:track:{id}:...` variants by taking the id
-                // segment only.
-                let id = id.split(':').next().unwrap_or(id);
-                if !id.is_empty() && id != seed_id && seen.insert(id.to_string()) {
-                    ids.push(id.to_string());
+/// Find the first playlist / station / album context uri referenced anywhere in a
+/// JSON value. Used when the apollo station response contains no track uris but a
+/// context uri to resolve (mirrors the observed `get_radio_for_track` behavior of
+/// returning only `spotify:playlist:37i9…`).
+fn first_context_uri(value: &serde_json::Value) -> Option<String> {
+    for prefix in ["spotify:playlist:", "spotify:station:", "spotify:album:"] {
+        let ids = collect_uri_ids(value, prefix);
+        if let Some(id) = ids.into_iter().next() {
+            // Reassemble the full uri from the matched prefix + id. `station:`
+            // uris nest an inner type (e.g. spotify:station:track:{id}); those are
+            // not stripped by collect_uri_ids beyond the first segment, so prefer
+            // playlist/album which are flat. For station, hand the full original
+            // string instead.
+            if prefix == "spotify:station:" {
+                // Recover the full station uri (its id part may itself be
+                // `track:{id}`), by searching for a string with this prefix.
+                if let Some(full) = find_first_string_with_prefix(value, prefix) {
+                    return Some(full);
                 }
             }
+            return Some(format!("{prefix}{id}"));
         }
-        serde_json::Value::Array(arr) => {
-            for v in arr {
-                collect_track_ids(v, seed_id, ids, seen);
-            }
-        }
-        serde_json::Value::Object(map) => {
-            for v in map.values() {
-                collect_track_ids(v, seed_id, ids, seen);
-            }
-        }
-        _ => {}
+    }
+    None
+}
+
+/// Return the first string value anywhere in `value` that begins with `prefix`.
+fn find_first_string_with_prefix(value: &serde_json::Value, prefix: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if s.starts_with(prefix) => Some(s.clone()),
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .find_map(|v| find_first_string_with_prefix(v, prefix)),
+        serde_json::Value::Object(map) => map
+            .values()
+            .find_map(|v| find_first_string_with_prefix(v, prefix)),
+        _ => None,
     }
 }
 
