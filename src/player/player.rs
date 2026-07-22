@@ -447,15 +447,16 @@ impl SpotifyPlayer {
                 Ok(())
             }
             Command::RefreshToken => {
-                let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
-                let token = self
-                    .oauth_client
+                // Refresh ONLY the Web-API access token. Do NOT reconnect the
+                // librespot session: librespot keeps streaming across Web-API token
+                // refreshes, and its connection is single-use (OnceLock) — a second
+                // `connect()` on the shared session would ERROR and break playback.
+                // We still require an active session (i.e. logged in).
+                if self.session.is_none() {
+                    return Err(SpotifyError::PlayerNotReady);
+                }
+                self.oauth_client
                     .get_valid_token()
-                    .await
-                    .map_err(|_| SpotifyError::LoginFailed)?;
-                let credentials = Credentials::with_access_token(token.access_token.clone());
-                session
-                    .connect(credentials, true)
                     .await
                     .map_err(|_| SpotifyError::LoginFailed)?;
                 self.delegate.refresh_successful();
@@ -523,28 +524,46 @@ impl SpotifyPlayer {
                 let settings = RiffSettings::new_from_gsettings().unwrap_or_default();
                 self.settings = settings.player_settings;
 
-                // Recreating the Player would orphan Spirc (it holds the old
-                // Arc<Player>). Tear Spirc down first, rebuild the Player, then
-                // respawn Spirc on the new Player so the Connect device survives a
-                // live-settings reload. (riff-connect.md §4.5, ReloadSettings
-                // footgun.)
+                // A live settings reload rebuilds the Player, which would orphan
+                // the Spirc receiver (it holds the old Arc<Player>). It must ALSO
+                // rebuild the Session: librespot 0.8 backs a Session's connection
+                // with a `OnceLock`, so the already-connected old session can never
+                // be re-`connect()`ed — Spirc (or a direct connect) needs a FRESH,
+                // unconnected session. So: tear Spirc down, drop the old session,
+                // build a fresh one, bind a new Player to it, and re-run the
+                // connect-once logic (Spirc connects it when enabled, else direct).
                 self.shutdown_spirc();
+                if let Some(old_session) = self.session.take() {
+                    // Shut the old connection down so it doesn't linger as an
+                    // orphaned dealer/streaming session on the account.
+                    old_session.shutdown();
+                }
 
                 // Clear the mixer so it gets recreated with updated volume curve/dB range
                 self.mixer.take();
 
-                let session = self.session.take().ok_or(SpotifyError::PlayerNotReady)?;
-                let new_player = self.create_player(session.clone());
+                // Need credentials to (re)connect the fresh session. If we can't
+                // get a token, we're effectively logged out — surface it.
+                let token = self
+                    .oauth_client
+                    .get_valid_token()
+                    .await
+                    .map_err(|_| SpotifyError::LoggedOut)?;
+                let creds = Credentials::with_access_token(token.access_token);
+
+                let new_session = build_unconnected_session(self.settings.ap_port);
+                let new_player = self.create_player(new_session.clone());
                 tokio::task::spawn(player_setup_delegate(
                     new_player.get_player_event_channel(),
                     self.delegate.clone(),
                     Arc::clone(&self.local_owns_player),
                 ));
                 self.player.replace(new_player);
-                self.session.replace(session);
+                self.session.replace(new_session);
 
-                // Respawn the Connect receiver on the rebuilt Player.
-                self.spawn_spirc().await;
+                // Connect the fresh session exactly once (Spirc when enabled, else
+                // direct) and bring the receiver back up on the rebuilt Player.
+                self.connect_shared_session(&creds).await?;
 
                 Ok(())
             }
@@ -619,40 +638,122 @@ impl SpotifyPlayer {
         self.oauth_client.save_credentials(&credentials).await;
 
         let creds = Credentials::with_access_token(&credentials.access_token);
-        let new_session = create_session(&creds, self.settings.ap_port).await?;
-        let username = new_session.username();
 
-        let oauth_client = Arc::clone(&self.oauth_client);
-        let session = new_session.clone();
-        tokio::task::spawn(async move {
-            loop {
-                if let Ok(token) = oauth_client.refresh_token_at_expiry().await {
-                    _ = session
-                        .connect(Credentials::with_access_token(token.access_token), true)
-                        .await;
-                }
-            }
-        });
+        // ONE session per login. Build it UNCONNECTED. The audio `Player` is bound
+        // to it now (Player construction needs no live connection); the SINGLE
+        // `connect()` happens below — performed BY Spirc when the receiver is
+        // enabled, or by us directly when it is disabled. This is the whole fix:
+        // Player and Spirc share ONE connected session, so Spotify never bumps one
+        // for the other (the two-session bug that killed local playback).
+        let new_session = build_unconnected_session(self.settings.ap_port);
 
+        // Bind the Player to the (still unconnected) shared session and store both
+        // BEFORE connecting, so the connect-once logic below drives the very
+        // session the Player streams through.
         let new_player = self.create_player(new_session.clone());
         tokio::task::spawn(player_setup_delegate(
             new_player.get_player_event_channel(),
             self.delegate.clone(),
             Arc::clone(&self.local_owns_player),
         ));
-
         self.player.replace(new_player);
         self.session.replace(new_session);
 
-        // Spawn the Spotify Connect RECEIVER now that Session + Player + Mixer are
-        // all live, so riff shows up in other Spotify apps' device lists and can be
-        // transferred to. Failure here must NOT block login — local playback still
-        // works without Spirc (see spawn_spirc).
-        self.spawn_spirc().await;
+        // CONNECT THE SHARED SESSION EXACTLY ONCE, then spawn the Connect receiver.
+        // - Spirc enabled : `spawn_spirc()` hands the shared session to
+        //   `Spirc::new`, which calls `session.connect()` once. On success both the
+        //   receiver AND the Player are live on that one connection.
+        // - Spirc disabled: no one else connects, so we connect it ourselves here.
+        // Either way the session is CONNECTED before this returns, and thus before
+        // the user can trigger a track load (playback is user-initiated afterward).
+        self.connect_shared_session(&creds).await?;
+
+        // Read the canonical username only AFTER the session is connected —
+        // `Session::username()` is empty until `connect()` populates it (librespot
+        // 0.8 sets it inside `connect`). This is the account id used for Web-API
+        // calls (playlists, etc.), so it must be the real value, not "".
+        let username = self
+            .session
+            .as_ref()
+            .map(|s| s.username())
+            .unwrap_or_default();
+
+        // Keep the Web-API access token fresh for the lifetime of the login. This
+        // does NOT touch the librespot session: librespot keeps streaming across
+        // Web-API token refreshes, and its connection is single-use (OnceLock), so
+        // reconnecting here would ERROR and is unnecessary.
+        let oauth_client = Arc::clone(&self.oauth_client);
+        tokio::task::spawn(async move {
+            loop {
+                if oauth_client.refresh_token_at_expiry().await.is_err() {
+                    // Logged out / no refresh token: stop the loop rather than spin.
+                    break;
+                }
+            }
+        });
 
         self.delegate.token_login_successful(username);
 
         Ok(())
+    }
+
+    /// Connect riff's shared (currently UNCONNECTED) `self.session` EXACTLY ONCE,
+    /// and bring up the Connect receiver on that same session.
+    ///
+    /// librespot 0.8 backs a `Session`'s connection with a `OnceLock`, so
+    /// `connect()` may be called at most once per `Session`. To keep the audio
+    /// `Player` and the Spirc receiver on ONE connection:
+    ///   * Spirc ENABLED  — hand the shared session to `Spirc::new`, which performs
+    ///     the single `connect()` internally. We do NOT connect it ourselves.
+    ///   * Spirc DISABLED — connect the shared session directly so local playback
+    ///     still works with no receiver.
+    /// On return (Ok) `self.session` is connected. Requires `self.session` and
+    /// `self.player` to already be set.
+    async fn connect_shared_session(
+        &mut self,
+        creds: &Credentials,
+    ) -> Result<(), SpotifyError> {
+        if Self::spirc_enabled() {
+            // Spirc performs the single `connect()` on the shared session.
+            if self.spawn_spirc(creds).await {
+                return Ok(());
+            }
+            // Spirc failed to start. It may have failed AFTER its internal
+            // `session.connect()` already succeeded (e.g. a later `auth_token()`
+            // step in `Spirc::new`). If so, the shared session is ALREADY
+            // connected and we MUST NOT connect it again — librespot's `OnceLock`
+            // makes a second `connect()` error. Detect that via the canonical
+            // username, which `connect()` populates on success (empty otherwise):
+            //   * username set  -> session connected by the partial Spirc run; the
+            //     Player can stream, so we're done.
+            //   * username empty -> Spirc failed BEFORE connecting; fall through to
+            //     a direct connect so local playback still works.
+            let already_connected = self
+                .session
+                .as_ref()
+                .map(|s| !s.username().is_empty())
+                .unwrap_or(false);
+            if already_connected {
+                eprintln!(
+                    "RIFF_SPIRC: receiver failed to start but shared session is already connected — local playback OK, receiver absent"
+                );
+                return Ok(());
+            }
+            eprintln!(
+                "RIFF_SPIRC: receiver did not start (session unconnected) — connecting shared session directly so local playback works"
+            );
+        }
+
+        // Spirc disabled (or failed before connecting): connect the shared session
+        // ourselves — exactly one connect on this session either way.
+        let session = self.session.as_ref().ok_or(SpotifyError::PlayerNotReady)?;
+        match session.connect(creds.clone(), true).await {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                warn!("Login failure (direct session connect): {err}");
+                Err(SpotifyError::LoginFailed)
+            }
+        }
     }
 
     /// Whether the Spotify Connect receiver (Spirc) is enabled. On by default;
@@ -679,55 +780,43 @@ impl SpotifyPlayer {
         }
     }
 
-    /// Spawn the Spirc Connect receiver using riff's EXISTING Session + Player +
-    /// Mixer. Idempotent-ish: shuts down any prior Spirc first. On any error the
-    /// receiver is simply absent — local playback is unaffected.
-    async fn spawn_spirc(&mut self) {
+    /// Spawn the Spirc Connect receiver on riff's SHARED (still UNCONNECTED)
+    /// `self.session`, connecting that one session via `Spirc::new`. The audio
+    /// `Player` is bound to the same session, so after this the receiver and local
+    /// playback both ride ONE connection — no second session, no account bump.
+    ///
+    /// Returns `true` iff the receiver started, in which case the shared session
+    /// is now CONNECTED (Spirc performed the single `connect()`). Returns `false`
+    /// if Spirc is disabled or failed to start; in that case the shared session is
+    /// still unconnected and the caller must connect it directly. Shuts down any
+    /// prior Spirc first (respawn path).
+    ///
+    /// `creds` are the credentials Spirc uses for the single `session.connect()`.
+    async fn spawn_spirc(&mut self, creds: &Credentials) -> bool {
         if !Self::spirc_enabled() {
             eprintln!("RIFF_SPIRC: receiver disabled via RIFF_SPIRC_DISABLE");
-            return;
+            return false;
         }
 
         // Always start from a clean slate (respawn path).
         self.shutdown_spirc();
 
         // Clone the shared handles into owned values up front so we don't hold any
-        // borrow of `self` across the awaits below (Spirc::new + token fetch),
-        // leaving `self` free for the `self.spirc = ...` assignment after. The
-        // `_session` binding only gates on "logged in" (session present); Spirc
-        // gets its OWN dedicated session below rather than this one — see comment
-        // at `build_unconnected_session`.
-        let (Some(_session), Some(player), Some(mixer)) = (
+        // borrow of `self` across the `Spirc::new` await, leaving `self` free for
+        // the `self.spirc = ...` assignment after. Spirc is handed the SAME
+        // `self.session` the Player streams through — that is the single-session
+        // fix. `Spirc::new` calls `session.connect()` on it exactly once.
+        let (Some(session), Some(player), Some(mixer)) = (
             self.session.clone(),
             self.player.clone(),
             self.mixer.clone(),
         ) else {
             eprintln!("RIFF_SPIRC: cannot spawn — session/player/mixer not ready");
-            return;
+            return false;
         };
         let initial_volume = (self.settings.volume.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
 
-        // Fresh credentials for Spirc's own session.connect. Uses the same OAuth
-        // token store as the rest of riff, so token refresh remains transparent.
-        let token = match self.oauth_client.get_valid_token().await {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("RIFF_SPIRC: no token to start receiver: {e:?}");
-                return;
-            }
-        };
-        let credentials = Credentials::with_access_token(token.access_token);
-
-        // Give Spirc its OWN, freshly-built (NOT-yet-connected) session rather
-        // than riff's already-connected `self.session`. `Spirc::new` connects
-        // the session it is handed, and librespot 0.8 backs the connection with
-        // a `OnceLock` — calling `connect()` a second time on an already-connected
-        // session fails with "Session is not connected" (the bug we hit when we
-        // passed `self.session`). This dedicated session shares riff's cache, so
-        // credentials/tokens stay in sync; it drives ONLY the Connect control
-        // plane (dealer). Remote-transferred playback still flows through riff's
-        // `Player` (passed below), so local playback is unaffected either way.
-        let session = build_unconnected_session(self.settings.ap_port);
+        let credentials = creds.clone();
 
         let device_name = connect_device_name();
         let config = ConnectConfig {
@@ -738,16 +827,18 @@ impl SpotifyPlayer {
             ..Default::default()
         };
 
-        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}' (connecting dedicated session)");
+        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}' (connecting shared session)");
         match Spirc::new(config, session, credentials, player, mixer).await {
             Ok((spirc, spirc_task)) => {
                 let task = tokio::task::spawn(spirc_task);
                 self.spirc = Some(spirc);
                 self.spirc_task = Some(task);
-                eprintln!("RIFF_SPIRC: receiver online");
+                eprintln!("RIFF_SPIRC: receiver online (shared session connected)");
+                true
             }
             Err(e) => {
-                eprintln!("RIFF_SPIRC: failed to start receiver: {e} (local playback unaffected)");
+                eprintln!("RIFF_SPIRC: failed to start receiver: {e}");
+                false
             }
         }
     }
@@ -879,16 +970,16 @@ impl SpotifyPlayer {
     }
 }
 
-const KNOWN_AP_PORTS: [Option<u16>; 4] = [None, Some(80), Some(443), Some(4070)];
-
 /// Build a FRESH, NOT-yet-connected librespot `Session` sharing riff's cache.
-/// The caller is responsible for calling `.connect(...)` on it (directly, or by
-/// handing it to `Spirc::new`, which connects it internally). Splitting this out
-/// lets the Connect receiver own its own un-connected session: `Spirc::new`
-/// unconditionally calls `session.connect()`, and librespot 0.8 backs the
-/// connection with a `OnceLock`, so a second `connect()` on an already-connected
-/// session fails with "Session is not connected". Spirc therefore MUST be given
-/// a session on which `connect()` has not been called yet.
+///
+/// There is exactly ONE `Session` object per login, shared by the audio `Player`
+/// and the Spirc receiver. It is CONNECTED exactly once — by `Spirc::new` when the
+/// receiver is enabled, or by a direct `session.connect()` when it is disabled
+/// (see `connect_shared_session`). librespot 0.8 backs a `Session`'s connection
+/// with a `OnceLock`, so `connect()` may run at most once per `Session`; that is
+/// why this returns an UNCONNECTED session and callers must ensure a single
+/// connect. On any event that would otherwise re-connect (settings reload,
+/// re-login) a brand new session is built here instead.
 fn build_unconnected_session(ap_port: Option<u16>) -> Session {
     let session_config = SessionConfig {
         ap_port,
@@ -904,43 +995,6 @@ fn build_unconnected_session(ap_port: Option<u16>) -> Session {
     .map_err(|e| dbg!(e))
     .ok();
     Session::new(session_config, cache)
-}
-
-async fn create_session_with_port(
-    credentials: &Credentials,
-    ap_port: Option<u16>,
-) -> Result<Session, SpotifyError> {
-    let session = build_unconnected_session(ap_port);
-    match session.connect(credentials.clone(), true).await {
-        Ok(_) => Ok(session),
-        Err(err) => {
-            warn!("Login failure: {}", err);
-            Err(SpotifyError::LoginFailed)
-        }
-    }
-}
-
-async fn create_session(
-    credentials: &Credentials,
-    ap_port: Option<u16>,
-) -> Result<Session, SpotifyError> {
-    match ap_port {
-        Some(_) => create_session_with_port(credentials, ap_port).await,
-        None => {
-            let mut ports_to_try = KNOWN_AP_PORTS.iter();
-            loop {
-                if let Some(next_port) = ports_to_try.next() {
-                    let res = create_session_with_port(credentials, *next_port).await;
-                    match res {
-                        Err(SpotifyError::TechnicalError) => continue,
-                        _ => break res,
-                    }
-                } else {
-                    break Err(SpotifyError::TechnicalError);
-                }
-            }
-        }
-    }
 }
 
 async fn player_setup_delegate(
