@@ -120,3 +120,12 @@ viewswitcherbar button:checked {
   background-color: transparent;
   box-shadow: none;
 }
+
+/* Now-Playing sheet: fullscreen-page look. The .now-playing-sheet CSS class is
+   set on the AdwBottomSheet in window.blp. Target its `sheet` subnode to flatten
+   the rounded top corners and remove the drop-shadow/border that makes it read as
+   a drawer. Other sheets (queue, song-menu, add-to-playlist) are unaffected. */
+.now-playing-sheet sheet {
+  border-radius: 0;
+  box-shadow: none;
+}

@@ -25,6 +25,11 @@ Adw.ApplicationWindow window {
     // is open. Opened by tapping the mini-player; there is no collapsed bottom-bar
     // (the mini-player + tab bar live in the content so they're always visible).
     modal: false;
+    // Fullscreen-page look: no pill (it overlaps the "Playing from" header) and
+    // the sheet surface is styled flat/edge-to-edge via .now-playing-sheet in CSS.
+    show-drag-handle: false;
+
+    styles ["now-playing-sheet"]
 
     content: Box {
       orientation: vertical;
