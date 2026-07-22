@@ -693,8 +693,11 @@ impl SpotifyPlayer {
 
         // Clone the shared handles into owned values up front so we don't hold any
         // borrow of `self` across the awaits below (Spirc::new + token fetch),
-        // leaving `self` free for the `self.spirc = ...` assignment after.
-        let (Some(session), Some(player), Some(mixer)) = (
+        // leaving `self` free for the `self.spirc = ...` assignment after. The
+        // `_session` binding only gates on "logged in" (session present); Spirc
+        // gets its OWN dedicated session below rather than this one — see comment
+        // at `build_unconnected_session`.
+        let (Some(_session), Some(player), Some(mixer)) = (
             self.session.clone(),
             self.player.clone(),
             self.mixer.clone(),
@@ -704,9 +707,8 @@ impl SpotifyPlayer {
         };
         let initial_volume = (self.settings.volume.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
 
-        // Fresh credentials for Spirc's own session.connect (it re-connects the
-        // Session as part of new()). Uses the same OAuth token store as the rest
-        // of riff, so token refresh remains transparent.
+        // Fresh credentials for Spirc's own session.connect. Uses the same OAuth
+        // token store as the rest of riff, so token refresh remains transparent.
         let token = match self.oauth_client.get_valid_token().await {
             Ok(t) => t,
             Err(e) => {
@@ -715,6 +717,17 @@ impl SpotifyPlayer {
             }
         };
         let credentials = Credentials::with_access_token(token.access_token);
+
+        // Give Spirc its OWN, freshly-built (NOT-yet-connected) session rather
+        // than riff's already-connected `self.session`. `Spirc::new` connects
+        // the session it is handed, and librespot 0.8 backs the connection with
+        // a `OnceLock` — calling `connect()` a second time on an already-connected
+        // session fails with "Session is not connected" (the bug we hit when we
+        // passed `self.session`). This dedicated session shares riff's cache, so
+        // credentials/tokens stay in sync; it drives ONLY the Connect control
+        // plane (dealer). Remote-transferred playback still flows through riff's
+        // `Player` (passed below), so local playback is unaffected either way.
+        let session = build_unconnected_session(self.settings.ap_port);
 
         let device_name = connect_device_name();
         let config = ConnectConfig {
@@ -725,7 +738,7 @@ impl SpotifyPlayer {
             ..Default::default()
         };
 
-        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}'");
+        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}' (connecting dedicated session)");
         match Spirc::new(config, session, credentials, player, mixer).await {
             Ok((spirc, spirc_task)) => {
                 let task = tokio::task::spawn(spirc_task);
@@ -868,10 +881,15 @@ impl SpotifyPlayer {
 
 const KNOWN_AP_PORTS: [Option<u16>; 4] = [None, Some(80), Some(443), Some(4070)];
 
-async fn create_session_with_port(
-    credentials: &Credentials,
-    ap_port: Option<u16>,
-) -> Result<Session, SpotifyError> {
+/// Build a FRESH, NOT-yet-connected librespot `Session` sharing riff's cache.
+/// The caller is responsible for calling `.connect(...)` on it (directly, or by
+/// handing it to `Spirc::new`, which connects it internally). Splitting this out
+/// lets the Connect receiver own its own un-connected session: `Spirc::new`
+/// unconditionally calls `session.connect()`, and librespot 0.8 backs the
+/// connection with a `OnceLock`, so a second `connect()` on an already-connected
+/// session fails with "Session is not connected". Spirc therefore MUST be given
+/// a session on which `connect()` has not been called yet.
+fn build_unconnected_session(ap_port: Option<u16>) -> Session {
     let session_config = SessionConfig {
         ap_port,
         ..Default::default()
@@ -885,7 +903,14 @@ async fn create_session_with_port(
     )
     .map_err(|e| dbg!(e))
     .ok();
-    let session = Session::new(session_config, cache);
+    Session::new(session_config, cache)
+}
+
+async fn create_session_with_port(
+    credentials: &Credentials,
+    ap_port: Option<u16>,
+) -> Result<Session, SpotifyError> {
+    let session = build_unconnected_session(ap_port);
     match session.connect(credentials.clone(), true).await {
         Ok(_) => Ok(session),
         Err(err) => {
