@@ -3,11 +3,17 @@ use futures::stream::StreamExt;
 
 use librespot::core::authentication::Credentials;
 use librespot::core::cache::Cache;
-use librespot::core::config::SessionConfig;
+use librespot::core::config::{DeviceType, SessionConfig};
 use librespot::core::session::Session;
 use librespot::core::spotify_id::SpotifyId;
 use librespot::core::SpotifyUri;
+use librespot::metadata::audio::item::{AudioItem, UniqueFields};
 use librespot::metadata::{Metadata, Track};
+
+// Spotify Connect RECEIVER: make riff a controllable Connect device via
+// librespot's Spirc, spawned on top of riff's existing authenticated Session +
+// Player + Mixer. See riff-connect.md §4 (Half B).
+use librespot::connect::{ConnectConfig, Spirc};
 
 use librespot::playback::mixer::softmixer::SoftMixer;
 use librespot::playback::mixer::{Mixer, MixerConfig};
@@ -34,6 +40,7 @@ use crate::settings::RiffSettings;
 use std::env;
 use std::error::Error;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -201,8 +208,25 @@ impl SpotifyPlayerSettings {
 pub struct SpotifyPlayer {
     settings: SpotifyPlayerSettings,
     player: Option<Arc<Player>>,
-    mixer: Option<Box<dyn Mixer>>,
+    // `Arc<dyn Mixer>` (was `Box`) so the SAME mixer can be shared with Spirc:
+    // Spirc::new wants `Arc<dyn Mixer>`, and volume set from either side must hit
+    // the same mixer. `Mixer::set_volume` takes `&self`, so no `&mut` is needed.
+    mixer: Option<Arc<dyn Mixer>>,
     session: Option<Session>,
+
+    // --- Spotify Connect RECEIVER (Spirc) ---------------------------------
+    // The Spirc control handle (Some once login has spawned it) + the JoinHandle
+    // of its driving task (so we can abort it on logout / settings-reload and not
+    // leak). Both are torn down together.
+    spirc: Option<Spirc>,
+    spirc_task: Option<tokio::task::JoinHandle<()>>,
+    // Shared flag read by the Player-event delegate: TRUE while riff owns a LOCAL
+    // playback session (its own queue drives the Player), FALSE otherwise. When a
+    // librespot Player event arrives and this is FALSE, it must be Spirc-driven
+    // (a remote transferred playback here), so the delegate MIRRORS it instead of
+    // firing riff's own `Next` at end-of-track. Set by `Command::SetLocalOwnsPlayer`
+    // from `PlayerNotifier`, mirroring the app-side `local_session_active`.
+    local_owns_player: Arc<AtomicBool>,
 
     // Shared equalizer configuration, updated live without recreating the player.
     eq_controller: EqController,
@@ -245,6 +269,9 @@ impl SpotifyPlayer {
             mixer: None,
             player: None,
             session: None,
+            spirc: None,
+            spirc_task: None,
+            local_owns_player: Arc::new(AtomicBool::new(false)),
             eq_controller,
             mono_controller,
             pan_controller,
@@ -275,8 +302,8 @@ impl SpotifyPlayer {
     async fn handle(&mut self, action: Command) -> Result<(), SpotifyError> {
         match action {
             Command::PlayerSetVolume(volume) => {
-                if let Some(mixer) = self.mixer.as_mut() {
-                    mixer_set_volume(&mut **mixer, volume);
+                if let Some(mixer) = self.mixer.as_ref() {
+                    mixer_set_volume(&**mixer, volume);
                 }
                 Ok(())
             }
@@ -302,6 +329,44 @@ impl SpotifyPlayer {
                 // Live update: no player/session recreation, no playback interruption.
                 self.settings.pitch_cents = cents;
                 self.pitch_controller.update(cents);
+                Ok(())
+            }
+            // --- Spotify Connect RECEIVER transport -----------------------
+            // Route riff's own transport actions to the Spirc handle while riff is
+            // the active Connect device. The handle methods are synchronous, only
+            // queue a SpircCommand, and are no-ops when this device isn't active,
+            // so an `Err` (channel closed = task gone) is logged, not surfaced.
+            Command::SpircPlay => {
+                self.spirc_do("play", |s| s.play());
+                Ok(())
+            }
+            Command::SpircPause => {
+                self.spirc_do("pause", |s| s.pause());
+                Ok(())
+            }
+            Command::SpircNext => {
+                self.spirc_do("next", |s| s.next());
+                Ok(())
+            }
+            Command::SpircPrev => {
+                self.spirc_do("prev", |s| s.prev());
+                Ok(())
+            }
+            Command::SpircSeek(position_ms) => {
+                self.spirc_do("seek", |s| s.set_position_ms(position_ms));
+                Ok(())
+            }
+            Command::SpircSetVolume(fraction) => {
+                let volume = (fraction.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
+                self.spirc_do("set_volume", |s| s.set_volume(volume));
+                Ok(())
+            }
+            Command::SetLocalOwnsPlayer(owns) => {
+                // Mirror the app-side local-session flag onto the player thread so
+                // the Player-event delegate can tell riff's own local playback
+                // (fire Next at end-of-track) from Spirc-driven receiver playback
+                // (mirror only, let Spirc advance).
+                self.local_owns_player.store(owns, Ordering::Relaxed);
                 Ok(())
             }
             Command::PlayerResume => {
@@ -398,6 +463,9 @@ impl SpotifyPlayer {
             }
             Command::Logout => {
                 self.oauth_client.clear_credentials().await;
+                // Tear down the Connect receiver first so it stops advertising the
+                // device and doesn't outlive the Session.
+                self.shutdown_spirc();
                 if let Some(session) = self.session.take() {
                     session.shutdown();
                 }
@@ -455,16 +523,28 @@ impl SpotifyPlayer {
                 let settings = RiffSettings::new_from_gsettings().unwrap_or_default();
                 self.settings = settings.player_settings;
 
+                // Recreating the Player would orphan Spirc (it holds the old
+                // Arc<Player>). Tear Spirc down first, rebuild the Player, then
+                // respawn Spirc on the new Player so the Connect device survives a
+                // live-settings reload. (riff-connect.md §4.5, ReloadSettings
+                // footgun.)
+                self.shutdown_spirc();
+
                 // Clear the mixer so it gets recreated with updated volume curve/dB range
                 self.mixer.take();
 
                 let session = self.session.take().ok_or(SpotifyError::PlayerNotReady)?;
-                let new_player = self.create_player(session);
+                let new_player = self.create_player(session.clone());
                 tokio::task::spawn(player_setup_delegate(
                     new_player.get_player_event_channel(),
                     self.delegate.clone(),
+                    Arc::clone(&self.local_owns_player),
                 ));
                 self.player.replace(new_player);
+                self.session.replace(session);
+
+                // Respawn the Connect receiver on the rebuilt Player.
+                self.spawn_spirc().await;
 
                 Ok(())
             }
@@ -558,13 +638,117 @@ impl SpotifyPlayer {
         tokio::task::spawn(player_setup_delegate(
             new_player.get_player_event_channel(),
             self.delegate.clone(),
+            Arc::clone(&self.local_owns_player),
         ));
 
         self.player.replace(new_player);
         self.session.replace(new_session);
+
+        // Spawn the Spotify Connect RECEIVER now that Session + Player + Mixer are
+        // all live, so riff shows up in other Spotify apps' device lists and can be
+        // transferred to. Failure here must NOT block login — local playback still
+        // works without Spirc (see spawn_spirc).
+        self.spawn_spirc().await;
+
         self.delegate.token_login_successful(username);
 
         Ok(())
+    }
+
+    /// Whether the Spotify Connect receiver (Spirc) is enabled. On by default;
+    /// set `RIFF_SPIRC_DISABLE=1` to opt out (e.g. to save the warm dealer
+    /// websocket on battery). Kept as an env var to avoid a gschema change.
+    fn spirc_enabled() -> bool {
+        !matches!(env::var("RIFF_SPIRC_DISABLE").as_deref(), Ok("1") | Ok("true"))
+    }
+
+    /// Run a fire-and-forget action on the Spirc handle, logging (never
+    /// surfacing) a closed-channel error. No-op when Spirc isn't running.
+    fn spirc_do<F>(&self, what: &str, f: F)
+    where
+        F: FnOnce(&Spirc) -> Result<(), librespot::core::Error>,
+    {
+        match self.spirc.as_ref() {
+            Some(spirc) => {
+                eprintln!("RIFF_SPIRC: handle command {what}");
+                if let Err(e) = f(spirc) {
+                    eprintln!("RIFF_SPIRC: handle command {what} failed: {e}");
+                }
+            }
+            None => eprintln!("RIFF_SPIRC: {what} ignored — no Spirc running"),
+        }
+    }
+
+    /// Spawn the Spirc Connect receiver using riff's EXISTING Session + Player +
+    /// Mixer. Idempotent-ish: shuts down any prior Spirc first. On any error the
+    /// receiver is simply absent — local playback is unaffected.
+    async fn spawn_spirc(&mut self) {
+        if !Self::spirc_enabled() {
+            eprintln!("RIFF_SPIRC: receiver disabled via RIFF_SPIRC_DISABLE");
+            return;
+        }
+
+        // Always start from a clean slate (respawn path).
+        self.shutdown_spirc();
+
+        // Clone the shared handles into owned values up front so we don't hold any
+        // borrow of `self` across the awaits below (Spirc::new + token fetch),
+        // leaving `self` free for the `self.spirc = ...` assignment after.
+        let (Some(session), Some(player), Some(mixer)) = (
+            self.session.clone(),
+            self.player.clone(),
+            self.mixer.clone(),
+        ) else {
+            eprintln!("RIFF_SPIRC: cannot spawn — session/player/mixer not ready");
+            return;
+        };
+        let initial_volume = (self.settings.volume.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
+
+        // Fresh credentials for Spirc's own session.connect (it re-connects the
+        // Session as part of new()). Uses the same OAuth token store as the rest
+        // of riff, so token refresh remains transparent.
+        let token = match self.oauth_client.get_valid_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("RIFF_SPIRC: no token to start receiver: {e:?}");
+                return;
+            }
+        };
+        let credentials = Credentials::with_access_token(token.access_token);
+
+        let device_name = connect_device_name();
+        let config = ConnectConfig {
+            name: device_name.clone(),
+            device_type: DeviceType::Smartphone,
+            // librespot's initial_volume is a u16 across the full range.
+            initial_volume,
+            ..Default::default()
+        };
+
+        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}'");
+        match Spirc::new(config, session, credentials, player, mixer).await {
+            Ok((spirc, spirc_task)) => {
+                let task = tokio::task::spawn(spirc_task);
+                self.spirc = Some(spirc);
+                self.spirc_task = Some(task);
+                eprintln!("RIFF_SPIRC: receiver online");
+            }
+            Err(e) => {
+                eprintln!("RIFF_SPIRC: failed to start receiver: {e} (local playback unaffected)");
+            }
+        }
+    }
+
+    /// Shut down the Spirc receiver + abort its task, clearing the device from
+    /// other apps' lists. Safe to call when nothing is running.
+    fn shutdown_spirc(&mut self) {
+        if let Some(spirc) = self.spirc.take() {
+            eprintln!("RIFF_SPIRC: shutting down receiver");
+            let _ = spirc.shutdown();
+        }
+        if let Some(task) = self.spirc_task.take() {
+            task.abort();
+        }
     }
 
     fn create_player(&mut self, session: Session) -> Arc<Player> {
@@ -617,14 +801,16 @@ impl SpotifyPlayer {
                     VolumeCurveType::Linear => VolumeCtrl::Linear,
                     VolumeCurveType::Cubic => VolumeCtrl::Cubic(VolumeCtrl::DEFAULT_DB_RANGE),
                 };
-                let mut mix = Box::new(
+                // `Arc<dyn Mixer>` so the SAME mixer instance can be handed to
+                // Spirc (Spirc::new wants `Arc<dyn Mixer>`).
+                let mix: Arc<dyn Mixer> = Arc::new(
                     SoftMixer::open(MixerConfig {
                         volume_ctrl,
                         ..Default::default()
                     })
                     .expect("Failed to create soft mixer"),
                 );
-                mixer_set_volume(&mut *mix, volume);
+                mixer_set_volume(&*mix, volume);
                 mix
             })
             .get_soft_volume();
@@ -732,8 +918,74 @@ async fn create_session(
     }
 }
 
-async fn player_setup_delegate(mut channel: PlayerEventChannel, delegate: AppPlayerDelegate) {
+async fn player_setup_delegate(
+    mut channel: PlayerEventChannel,
+    delegate: AppPlayerDelegate,
+    local_owns_player: Arc<AtomicBool>,
+) {
+    // Tracks whether we last told the app it was in receiver (Spirc-driven) mode,
+    // so we only emit `set_remote_controlled` on an actual edge.
+    let mut receiving = false;
+
     while let Some(event) = channel.recv().await {
+        // Who owns the Player right now? If riff started a local session, these
+        // events are riff's own local playback (drive the queue). Otherwise a
+        // remote app transferred playback here and Spirc is driving the Player —
+        // we MIRROR its events and must NOT fire riff's own `Next`.
+        let owns_local = local_owns_player.load(Ordering::Relaxed);
+
+        // Detect the receiver-mode edge from Player activity we didn't originate.
+        let spirc_active_event = matches!(
+            event,
+            PlayerEvent::TrackChanged { .. }
+                | PlayerEvent::Playing { .. }
+                | PlayerEvent::Loading { .. }
+        );
+        if !owns_local && spirc_active_event && !receiving {
+            receiving = true;
+            delegate.set_remote_controlled(true);
+        }
+        // If riff owns local playback again, leave receiver mode.
+        if owns_local && receiving {
+            receiving = false;
+            delegate.set_remote_controlled(false);
+        }
+
+        if receiving {
+            // ---- RECEIVER MODE: mirror Spirc-driven playback (display only) ----
+            match event {
+                PlayerEvent::TrackChanged { audio_item } => {
+                    if let Some(song) = song_from_audio_item(&audio_item) {
+                        delegate.mirror_remote_track(song);
+                    }
+                }
+                PlayerEvent::Playing { position_ms, .. } => {
+                    delegate.mirror_remote_playing(true);
+                    delegate.notify_playback_state(position_ms);
+                }
+                PlayerEvent::Paused { position_ms, .. } => {
+                    delegate.mirror_remote_playing(false);
+                    delegate.notify_playback_state(position_ms);
+                }
+                PlayerEvent::Seeked { position_ms, .. }
+                | PlayerEvent::PositionCorrection { position_ms, .. } => {
+                    delegate.notify_playback_state(position_ms);
+                }
+                // The remote transferred playback AWAY from riff (or disconnected):
+                // Spirc stopped driving the Player, so leave receiver mode and hand
+                // ownership back to riff's own (now idle) queue.
+                PlayerEvent::Stopped { .. } | PlayerEvent::SessionDisconnected { .. } => {
+                    receiving = false;
+                    delegate.set_remote_controlled(false);
+                }
+                // Crucially, do NOT fire riff's own `Next` on EndOfTrack while
+                // receiving — Spirc owns advancing the queue.
+                _ => {}
+            }
+            continue;
+        }
+
+        // ---- LOCAL MODE: unchanged behavior (riff owns the queue) ----
         match event {
             PlayerEvent::EndOfTrack { .. } => {
                 delegate.end_of_track_reached();
@@ -747,6 +999,74 @@ async fn player_setup_delegate(mut channel: PlayerEventChannel, delegate: AppPla
             }
             _ => {}
         }
+    }
+}
+
+/// Build a riff `SongDescription` from a librespot `AudioItem` (delivered by the
+/// `PlayerEvent::TrackChanged` event while Spirc drives playback). Mirrors the
+/// shape of `song_from_track` but sources fields from the already-resolved
+/// `AudioItem` (no extra metadata fetch). Returns `None` for non-track items
+/// (episodes / local files) we don't render in the now-playing bar.
+fn song_from_audio_item(item: &AudioItem) -> Option<SongDescription> {
+    let id = item.track_id.to_id().ok()?;
+
+    let (artists, album_name, track_number) = match &item.unique_fields {
+        UniqueFields::Track {
+            artists,
+            album,
+            number,
+            ..
+        } => {
+            let artists: Vec<ArtistRef> = artists
+                .0
+                .iter()
+                .map(|a| ArtistRef {
+                    id: a.id.to_id().unwrap_or_default(),
+                    name: a.name.clone(),
+                })
+                .collect();
+            let number = if *number > 0 { Some(*number) } else { None };
+            (artists, album.clone(), number)
+        }
+        // Episodes / local files: no artist/album in the Track shape; render the
+        // name only so the now-playing bar still updates.
+        _ => (Vec::new(), String::new(), None),
+    };
+
+    // AudioItem covers already carry ready-to-use CDN urls (+ width).
+    let art = ImageSet::from_images(item.covers.iter().map(|c| {
+        let width = if c.width > 0 { Some(c.width as u32) } else { None };
+        (width, c.url.clone())
+    }));
+
+    Some(SongDescription {
+        id,
+        track_number,
+        uri: item.uri.clone(),
+        title: item.name.clone(),
+        artists,
+        album: AlbumRef {
+            id: String::new(),
+            name: album_name,
+        },
+        duration_ms: item.duration_ms,
+        art,
+    })
+}
+
+/// The name riff advertises as a Spotify Connect device. Prefers `RIFF_SPIRC_NAME`,
+/// then the system hostname as "riff (<host>)", falling back to plain "riff".
+fn connect_device_name() -> String {
+    if let Ok(name) = env::var("RIFF_SPIRC_NAME") {
+        if !name.trim().is_empty() {
+            return name;
+        }
+    }
+    let host = glib::host_name().to_string();
+    if host.is_empty() {
+        "riff".to_string()
+    } else {
+        format!("riff ({host})")
     }
 }
 
@@ -1190,6 +1510,6 @@ fn find_first_string_with_prefix(value: &serde_json::Value, prefix: &str) -> Opt
 /// The VolumeCtrl curve (configured in create_player) determines the dB mapping.
 /// The curve's db_range parameter (derived from volume_min_db/volume_max_db settings)
 /// controls how many dB of dynamic range the slider spans.
-fn mixer_set_volume(mixer: &mut dyn Mixer, volume: f64) {
+fn mixer_set_volume(mixer: &dyn Mixer, volume: f64) {
     mixer.set_volume((VolumeCtrl::MAX_VOLUME as f64 * volume) as u16);
 }

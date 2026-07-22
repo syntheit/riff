@@ -42,6 +42,16 @@ pub struct PlaybackState {
     // gates the remote MIRROR (not raw play/pause), so pausing local playback
     // doesn't get the user yanked back to the desktop.
     local_session_active: bool,
+    // Whether riff is currently being driven as a Spotify Connect RECEIVER: a
+    // remote Spotify app transferred playback TO riff, and librespot's Spirc now
+    // owns the local `Player` (issues its own loads / next / seek). While true,
+    // riff must NOT double-drive the `Player` from its own queue — transport UI
+    // routes to the Spirc handle instead, and the librespot Player events are
+    // MIRRORED into the fields above for display only. Flipped by the player
+    // thread via `SetRemoteControlled` as Spirc activates / deactivates. This is
+    // the "who owns the Player" switch that keeps riff's queue and Spirc from
+    // fighting (see riff-connect.md §4.3, receiver mode).
+    is_remote_controlled: bool,
 }
 
 // Most mutatings methods shouldn't be pub
@@ -360,6 +370,14 @@ impl PlaybackState {
         self.local_session_active
     }
 
+    /// Whether riff is currently being driven as a Spotify Connect RECEIVER
+    /// (a remote app transferred playback here and Spirc owns the local Player).
+    /// While true, riff's own queue must not drive the Player and transport
+    /// controls route to the Spirc handle.
+    pub fn is_remote_controlled(&self) -> bool {
+        self.is_remote_controlled
+    }
+
     /// Whether the UI should MIRROR remote playback right now: a remote snapshot
     /// exists, the active device is Local (we haven't switched to control a
     /// Connect device directly), AND riff doesn't own a local session. Gating on
@@ -427,6 +445,7 @@ impl Default for PlaybackState {
             current_override: None,
             remote_playback: None,
             local_session_active: false,
+            is_remote_controlled: false,
         }
     }
 }
@@ -463,6 +482,12 @@ pub enum PlaybackAction {
     /// Set (or clear) the mirrored remote-playback snapshot from a poll of
     /// `GET /me/player`. `None` clears it (remote stopped / became local).
     SetRemotePlayback(Option<RemotePlayback>),
+    /// Enter / leave Spotify Connect RECEIVER mode: `true` when a remote app
+    /// transferred playback to riff and librespot's Spirc now owns the local
+    /// Player; `false` when it releases. Emitted by the player thread. While
+    /// receiving, riff's own queue must not drive the Player (transport routes
+    /// to Spirc), and Player events are mirrored in for display.
+    SetRemoteControlled(bool),
 }
 
 impl From<PlaybackAction> for AppAction {
@@ -496,6 +521,15 @@ pub enum PlaybackEvent {
     /// The mirrored remote-playback snapshot changed (track/state/progress on
     /// another device, or it appeared/disappeared). UI re-renders from it.
     RemotePlaybackChanged,
+    /// Spotify Connect receiver mode toggled: `true` when a remote app took over
+    /// riff's local Player via Spirc, `false` when it released back to riff's own
+    /// queue. `PlayerNotifier` uses this to route transport to Spirc vs the local
+    /// player.
+    RemoteControlChanged(bool),
+    /// The user pressed Next/Previous while riff is a Connect receiver; route the
+    /// skip to the Spirc handle (Spirc owns the queue) instead of riff's own.
+    RemoteNextRequested,
+    RemotePrevRequested,
 }
 
 impl From<PlaybackEvent> for AppEvent {
@@ -557,6 +591,12 @@ impl UpdatableState for PlaybackState {
                 vec![PlaybackEvent::ShuffleChanged(self.is_shuffled)]
             }
             PlaybackAction::Next => {
+                // In receiver mode Spirc owns the queue: don't advance riff's own
+                // (single mirrored) queue — ask Spirc to skip and let the mirror
+                // reflect the new track.
+                if self.is_remote_controlled {
+                    return vec![PlaybackEvent::RemoteNextRequested];
+                }
                 if let Some(id) = self.play_next() {
                     vec![PlaybackEvent::TrackChanged(id)]
                 } else {
@@ -569,6 +609,9 @@ impl UpdatableState for PlaybackState {
                 vec![PlaybackEvent::PlaybackStopped]
             }
             PlaybackAction::Previous => {
+                if self.is_remote_controlled {
+                    return vec![PlaybackEvent::RemotePrevRequested];
+                }
                 if let Some(id) = self.play_prev() {
                     vec![PlaybackEvent::TrackChanged(id)]
                 } else {
@@ -667,6 +710,26 @@ impl UpdatableState for PlaybackState {
                 } else {
                     vec![]
                 }
+            }
+            PlaybackAction::SetRemoteControlled(controlled) => {
+                if self.is_remote_controlled == controlled {
+                    return vec![];
+                }
+                self.is_remote_controlled = controlled;
+                if controlled {
+                    // A remote app transferred playback to riff: riff is now the
+                    // active local player (Spirc-driven), so the OTHER-device
+                    // mirror must yield and stay yielded until release.
+                    self.remote_playback = None;
+                    self.local_session_active = true;
+                } else {
+                    // Spirc released control. Whatever Spirc left loaded is riff's
+                    // current queue/track; keep the local session so we don't snap
+                    // back to a stale remote mirror on release.
+                    self.local_session_active = self.list_position.is_some()
+                        || self.current_override.is_some();
+                }
+                vec![PlaybackEvent::RemoteControlChanged(controlled)]
             }
             PlaybackAction::SwitchDevice(new_device) => {
                 // Explicitly picking a remote Connect device to control means the
@@ -943,6 +1006,38 @@ mod tests {
         assert!(!state
             .update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(None)))
             .is_empty());
+    }
+
+    #[test]
+    fn test_remote_controlled_yields_other_device_mirror() {
+        let mut state = PlaybackState::default();
+        // Desktop is playing: mirror it while idle.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        assert!(state.is_mirroring_remote());
+
+        // A remote app transfers playback TO riff (Spirc becomes active).
+        let events = state.update_with(Cow::Owned(PlaybackAction::SetRemoteControlled(true)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::RemoteControlChanged(true))));
+        assert!(state.is_remote_controlled());
+        // The other-device mirror must yield; riff is the active player now.
+        assert!(!state.is_mirroring_remote());
+        assert!(state.local_session_active());
+
+        // Idempotent: setting the same value emits nothing.
+        assert!(state
+            .update_with(Cow::Owned(PlaybackAction::SetRemoteControlled(true)))
+            .is_empty());
+
+        // Release: back to riff's own queue ownership.
+        let events = state.update_with(Cow::Owned(PlaybackAction::SetRemoteControlled(false)));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::RemoteControlChanged(false))));
+        assert!(!state.is_remote_controlled());
     }
 
     #[test]

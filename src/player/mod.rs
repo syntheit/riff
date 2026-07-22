@@ -36,6 +36,25 @@ pub enum Command {
     SetMono { enabled: bool },
     SetPan { pan: f64 },
     SetPitch { cents: f64 },
+    // --- Spotify Connect RECEIVER (Spirc) ---------------------------------
+    // Transport commands routed to the librespot Spirc handle when riff is the
+    // active Connect device (a remote app transferred playback here). These make
+    // riff's own transport buttons drive the Spirc-owned playback, so Spirc keeps
+    // its connect-state coherent and reports it back to other devices. No-ops when
+    // Spirc isn't running / not the active device.
+    SpircPlay,
+    SpircPause,
+    SpircNext,
+    SpircPrev,
+    SpircSeek(u32),
+    /// Volume as a 0.0..=1.0 fraction; scaled to librespot's u16 range.
+    SpircSetVolume(f64),
+    /// Tell the player thread whether riff currently owns a LOCAL playback
+    /// session (user played something in riff's own queue). The Player-event
+    /// delegate reads this to decide, for an incoming librespot event, whether it
+    /// is riff's own local playback (drive riff's queue: fire Next at end-of-track)
+    /// or Spirc-driven receiver playback (mirror only, let Spirc advance).
+    SetLocalOwnsPlayer(bool),
 }
 
 #[derive(Clone)]
@@ -91,6 +110,45 @@ impl AppPlayerDelegate {
 
     fn login_challenge_started(&self, url: Url) {
         self.send(LoginAction::OpenLoginUrl(url).into())
+    }
+
+    // --- Spotify Connect RECEIVER (Spirc) mirroring -----------------------
+    // The librespot Player is a MULTI-subscriber event source. Riff keeps its own
+    // subscription (via `player_setup_delegate`); when Spirc — not riff's queue —
+    // is driving the Player (a remote app transferred playback here), these bridge
+    // the librespot Player events into riff's `PlaybackState` so the mini-player /
+    // now-playing reflect what Spirc is playing. Display-only: riff does NOT issue
+    // its own loads while receiving (see `is_remote_controlled`).
+
+    /// Enter / leave receiver mode (Spirc took over / released the local Player).
+    fn set_remote_controlled(&self, controlled: bool) {
+        eprintln!("RIFF_SPIRC: mirror set_remote_controlled({controlled})");
+        self.send(PlaybackAction::SetRemoteControlled(controlled).into())
+    }
+
+    /// Mirror the Spirc-driven current track into riff's display queue. We load a
+    /// one-song queue and select it, so the existing now-playing UI renders it
+    /// with no UI changes. Called on librespot `TrackChanged` while receiving.
+    #[allow(deprecated)]
+    fn mirror_remote_track(&self, song: SongDescription) {
+        eprintln!(
+            "RIFF_SPIRC: mirror track '{}' — {}",
+            song.title,
+            song.artists_name()
+        );
+        let id = song.id.clone();
+        self.send(PlaybackAction::LoadSongs(vec![song]).into());
+        self.send(PlaybackAction::Load(id).into());
+    }
+
+    /// Mirror the Spirc-driven play/pause state.
+    fn mirror_remote_playing(&self, playing: bool) {
+        eprintln!("RIFF_SPIRC: mirror playing={playing}");
+        if playing {
+            self.send(PlaybackAction::Play.into())
+        } else {
+            self.send(PlaybackAction::Pause.into())
+        }
     }
 }
 
