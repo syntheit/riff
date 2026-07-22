@@ -146,6 +146,20 @@ pub trait SpotifyApiClient {
         offset: usize,
     ) -> BoxFuture<SpotifyResult<()>>;
 
+    /// Start playback on `device_id` from scratch (`PUT /me/player/play`), used
+    /// to route a play the user triggered in riff onto whichever device is the
+    /// active OUTPUT. Pass EITHER `context_uri` (playlist/album) + `offset`, OR an
+    /// explicit `uris` track list + `offset`; `position_ms` optionally seeks into
+    /// the starting track. Unlike `player_transfer` this specifies WHAT to play.
+    fn player_play_context(
+        &self,
+        device_id: String,
+        context_uri: Option<String>,
+        uris: Option<Vec<String>>,
+        offset_position: Option<usize>,
+        position_ms: Option<u32>,
+    ) -> BoxFuture<SpotifyResult<()>>;
+
     fn player_state(&self) -> BoxFuture<SpotifyResult<ConnectPlayerState>>;
 
     /// A rich snapshot of whatever is playing on the user's *active* Spotify
@@ -973,6 +987,31 @@ impl SpotifyApiClient for CachedSpotifyClient {
                         offset: PlayOffset {
                             position: offset as u32,
                         },
+                    },
+                )
+                .send_no_response(),
+        )
+    }
+
+    fn player_play_context(
+        &self,
+        device_id: String,
+        context_uri: Option<String>,
+        uris: Option<Vec<String>>,
+        offset_position: Option<usize>,
+        position_ms: Option<u32>,
+    ) -> BoxFuture<SpotifyResult<()>> {
+        Box::pin(
+            self.client
+                .player_play_context(
+                    &device_id,
+                    PlayContextRequest {
+                        context_uri,
+                        uris,
+                        offset: offset_position.map(|position| PlayOffset {
+                            position: position as u32,
+                        }),
+                        position_ms,
                     },
                 )
                 .send_no_response(),

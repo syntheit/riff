@@ -748,6 +748,25 @@ impl SpotifyClient {
             .json_body(request)
     }
 
+    // Start playback on a SPECIFIC device via `PUT /v1/me/player/play?device_id=…`
+    // with a JSON body carrying only the relevant fields (context_uri + offset,
+    // OR uris + offset, plus an optional position_ms). Used to route a play the
+    // user triggered in riff onto whichever device is the active OUTPUT (the
+    // "tap plays on the active device" behavior) — riff acts as a remote.
+    pub(crate) fn player_play_context(
+        &self,
+        device_id: &str,
+        request: PlayContextRequest,
+    ) -> SpotifyRequest<'_, Vec<u8>, ()> {
+        let query = make_query_params()
+            .append_pair("device_id", device_id)
+            .finish();
+        self.request()
+            .method(Method::PUT)
+            .uri("/v1/me/player/play".to_string(), Some(&query))
+            .json_body(request)
+    }
+
     pub(crate) fn player_pause(&self, device_id: &str) -> SpotifyRequest<'_, (), ()> {
         let query = make_query_params()
             .append_pair("device_id", device_id)

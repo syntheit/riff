@@ -251,14 +251,23 @@ impl PlaybackState {
     }
 
     fn play_index(&mut self, index: usize) -> Option<String> {
+        // If a REMOTE device is the active output (and riff isn't the chosen local
+        // output), this play is being ROUTED to that device — riff stays a remote
+        // and keeps mirroring it, so we must NOT open a local session. Capture the
+        // decision BEFORE mutating so it reflects the state at play-initiation.
+        let routes_remote = self.active_remote_device().is_some();
         self.current_override = None;
         self.is_playing = true;
         self.list_position.replace(index);
         self.seek_position.set(0, true);
         self.index.next_until(index + 1);
-        // Playing a local track opens (or keeps) a local session — this "wins"
-        // over any mirrored remote device until the user explicitly leaves.
-        self.local_session_active = true;
+        // Playing a LOCAL track opens (or keeps) a local session — this "wins"
+        // over any mirrored remote device until the user explicitly leaves. When
+        // routing to a remote device we deliberately leave `local_session_active`
+        // untouched so the mirror keeps surfacing that device.
+        if !routes_remote {
+            self.local_session_active = true;
+        }
         self.current_song_id()
     }
 
@@ -266,10 +275,13 @@ impl PlaybackState {
         // Manual queue plays first, ahead of the context.
         if let Some(song) = self.manual_queue.pop_front() {
             let id = song.id.clone();
+            let routes_remote = self.active_remote_device().is_some();
             self.current_override = Some(song);
             self.is_playing = true;
             self.seek_position.set(0, true);
-            self.local_session_active = true;
+            if !routes_remote {
+                self.local_session_active = true;
+            }
             return Some(id);
         }
         self.next_index().and_then(|i| {
@@ -390,6 +402,29 @@ impl PlaybackState {
         self.remote_playback.is_some()
             && matches!(self.current_device, Device::Local)
             && !self.local_session_active
+    }
+
+    /// The remote device that is currently the ACTIVE OUTPUT, when riff should
+    /// route a newly-triggered play there instead of playing locally (the "tap
+    /// plays on the active device" behavior). This is `Some(device_id)` iff:
+    ///   - a remote-playback snapshot exists (some other device is the active
+    ///     Spotify player), AND
+    ///   - riff is NOT the chosen local output — i.e. we don't own a local
+    ///     session (`!local_session_active`), the active device is still `Local`
+    ///     (the user hasn't switched to directly control a Connect device, which
+    ///     already routes through the Connect path), and riff isn't itself a
+    ///     Connect RECEIVER (a remote transferred playback TO us).
+    /// Otherwise `None` → play locally (making riff the active output). Once the
+    /// user plays locally (`local_session_active`) or transfers OUTPUT to riff,
+    /// this returns `None` and taps play locally again.
+    pub fn active_remote_device(&self) -> Option<String> {
+        if self.local_session_active || self.is_remote_controlled {
+            return None;
+        }
+        if !matches!(self.current_device, Device::Local) {
+            return None;
+        }
+        self.remote_playback.as_ref().map(|r| r.device.id.clone())
     }
 
     /// The track to display: the remote snapshot's track while mirroring a remote
@@ -878,35 +913,97 @@ mod tests {
     }
 
     #[test]
-    fn test_local_playback_wins_over_stale_remote_snapshot() {
+    fn test_local_playback_wins_over_later_remote_snapshot() {
         let mut state = PlaybackState::default();
-        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
-            "dev1", "remote-song", true, 5000,
-        )))));
-        // Now riff plays locally: the mirror must yield to the local track.
+        // No remote is active, so playing locally makes riff the active output.
         state.queue(vec![song("local-song")]);
         state.play("local-song");
         assert!(state.is_playing());
+        assert!(state.local_session_active());
+        // A later remote-playback poll must NOT hijack riff's local session.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
         assert!(!state.is_mirroring_remote());
         assert_eq!(
             state.displayed_song().map(|s| s.id),
             Some("local-song".to_string())
         );
+        // ...and taps stay local while the local session is active.
+        assert!(state.active_remote_device().is_none());
+    }
+
+    // A play triggered while a REMOTE device is the active output is ROUTED to
+    // that device: riff must NOT open a local session and must keep mirroring
+    // (the "tap plays on the active device" behavior).
+    #[test]
+    fn test_play_routes_to_active_remote_and_keeps_mirroring() {
+        let mut state = PlaybackState::default();
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        assert!(state.is_mirroring_remote());
+        // The active output is the remote device.
+        assert_eq!(state.active_remote_device(), Some("dev1".to_string()));
+
+        // User taps a song in riff: the state loads it but, because a remote is
+        // the active output, no local session opens and the mirror stays.
+        state.queue(vec![song("local-song")]);
+        state.update_with(Cow::Owned(PlaybackAction::Load("local-song".to_string())));
+        assert!(!state.local_session_active());
+        assert!(state.is_mirroring_remote());
+        assert_eq!(
+            state.displayed_song().map(|s| s.id),
+            Some("remote-song".to_string())
+        );
+    }
+
+    // Once riff is the chosen local output (local session active), taps play
+    // LOCALLY again even though a remote snapshot is still mirrored/present.
+    #[test]
+    fn test_no_active_remote_when_local_session_owns() {
+        let mut state = PlaybackState::default();
+        // First establish a local session (no remote active).
+        state.queue(vec![song("a"), song("b")]);
+        state.update_with(Cow::Owned(PlaybackAction::Load("a".to_string())));
+        assert!(state.local_session_active());
+        // A remote snapshot arrives but we own the local session.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        assert!(state.active_remote_device().is_none());
+        // A second tap plays locally too.
+        state.update_with(Cow::Owned(PlaybackAction::Load("b".to_string())));
+        assert!(state.local_session_active());
+        assert!(!state.is_mirroring_remote());
+    }
+
+    // After transferring OUTPUT to riff (Spirc receiver), taps play local: there
+    // is no "active remote" to route to.
+    #[test]
+    fn test_no_active_remote_while_receiver() {
+        let mut state = PlaybackState::default();
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
+        state.update_with(Cow::Owned(PlaybackAction::SetRemoteControlled(true)));
+        assert!(state.active_remote_device().is_none());
     }
 
     #[test]
     fn test_local_pause_stays_sticky_and_does_not_remirror() {
         let mut state = PlaybackState::default();
-        // Desktop is playing: mirror it while idle.
-        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
-            "dev1", "remote-song", true, 5000,
-        )))));
-        assert!(state.is_mirroring_remote());
-
-        // User plays something locally: the local session takes over.
+        // User plays something locally first (no remote active): riff owns the
+        // local session and becomes the active output.
         state.queue(vec![song("local-song")]);
         state.update_with(Cow::Owned(PlaybackAction::Load("local-song".to_string())));
         assert!(state.local_session_active());
+        assert!(!state.is_mirroring_remote());
+
+        // A desktop later reports playback, but the sticky local session ignores it.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
         assert!(!state.is_mirroring_remote());
 
         // Pausing locally must NOT hand the display back to the desktop.
@@ -928,12 +1025,14 @@ mod tests {
     #[test]
     fn test_local_session_cleared_on_switch_to_connect_remirrors() {
         let mut state = PlaybackState::default();
-        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
-            "dev1", "remote-song", true, 5000,
-        )))));
+        // Establish a local session first (no remote active).
         state.queue(vec![song("local-song")]);
         state.update_with(Cow::Owned(PlaybackAction::Load("local-song".to_string())));
         assert!(state.local_session_active());
+        // A remote snapshot exists (so the mirror can resume once we leave local).
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "dev1", "remote-song", true, 5000,
+        )))));
 
         // Explicitly transfer to the Connect device: the local session ends.
         state.update_with(Cow::Owned(PlaybackAction::SwitchDevice(Device::Connect(

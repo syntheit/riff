@@ -145,6 +145,13 @@ impl PlayerNotifier {
         self.app_model.get_state().playback.is_remote_controlled()
     }
 
+    // The remote device that is the active OUTPUT right now (a remote is playing
+    // and riff isn't the chosen local output), so a play the user just triggered
+    // should be ROUTED there rather than played locally. `None` -> play locally.
+    fn active_remote_device(&self) -> Option<String> {
+        self.app_model.get_state().playback.active_remote_device()
+    }
+
     fn currently_playing(&self) -> Option<CurrentlyPlaying> {
         let state = self.app_model.get_state();
         let song = state.playback.current_song_id()?;
@@ -293,6 +300,67 @@ impl PlayerNotifier {
         }
     }
 
+    // "Tap plays on the active device": a play was triggered in riff while a
+    // REMOTE device is the active output. Instead of playing locally, START that
+    // playback ON the remote device via the Web API (`PUT /me/player/play?
+    // device_id=…`) and let the existing mirror surface it. Builds the request
+    // from what riff just loaded:
+    //   - a playlist/album source (has a Spotify context uri) -> `context_uri`
+    //     + `offset` to the tapped track;
+    //   - anything else (radio station, ad-hoc/liked/search track list) -> an
+    //     explicit `uris` list (spotify:track:…) + `offset` to the tapped track.
+    // We do NOT also start local playback, and (because the play was routed while
+    // a remote was active) `local_session_active` was left false, so riff stays a
+    // remote and keeps mirroring. Fire-and-forget; a failure is logged and the
+    // mirror poll reconciles. Only fired on TrackChanged / SourceChanged (an
+    // actual (re)load), not on transport-only events.
+    fn route_play_to_remote(&self, device_id: String) {
+        let Some(playing) = self.currently_playing() else {
+            return;
+        };
+        // Spotify caps the explicit `uris` list; keep the tapped track in range by
+        // windowing a large list around the offset before capping.
+        const MAX_URIS: usize = 500;
+        let (context_uri, uris, offset) = match playing {
+            CurrentlyPlaying::WithSource { source, offset, .. } => {
+                (source.spotify_uri(), None, offset)
+            }
+            CurrentlyPlaying::Songs { songs, offset } => {
+                let (window, offset) = if songs.len() > MAX_URIS {
+                    let start = offset.min(songs.len().saturating_sub(MAX_URIS));
+                    let end = (start + MAX_URIS).min(songs.len());
+                    (songs[start..end].to_vec(), offset - start)
+                } else {
+                    (songs, offset)
+                };
+                let uris = window
+                    .into_iter()
+                    .map(|id| format!("spotify:track:{id}"))
+                    .collect::<Vec<_>>();
+                (None, Some(uris), offset)
+            }
+        };
+
+        eprintln!(
+            "RIFF_CONNECT: routing play to ACTIVE remote device={device_id} context={context_uri:?} uris={} offset={offset}",
+            uris.as_ref().map(|u| u.len()).unwrap_or(0)
+        );
+
+        let api = self.app_model.get_spotify();
+        self.dispatcher.dispatch_async(Box::pin(async move {
+            if let Err(err) = api
+                .player_play_context(device_id, context_uri, uris, Some(offset), None)
+                .await
+            {
+                error!("failed to route play to remote device: {err}");
+            }
+            // Re-poll the mirror so the UI reflects the remote starting right away
+            // (whether the play succeeded or the device vanished and we should
+            // clear). This runs regardless so a stale mirror doesn't linger.
+            Some(AppAction::RepollRemoteMirror)
+        }));
+    }
+
     fn send_command_to_connect_player(&self, command: ConnectCommand) {
         self.connect_command_sender.unbounded_send(command).unwrap();
     }
@@ -433,7 +501,39 @@ impl EventListener for PlayerNotifier {
             (_, AppEvent::Started) | (_, AppEvent::NowPlayingSheetShown) => {
                 self.refresh_remote_mirror();
             }
+            // "Tap plays on the ACTIVE device": the active device is Local, but a
+            // REMOTE device is the active OUTPUT (mirroring) and riff isn't the
+            // chosen local output. A play the user just triggered (an actual
+            // (re)load — TrackChanged / SourceChanged) must START on that remote
+            // device, not locally. Transport-only events (pause/resume/seek/vol)
+            // never reach here for a mirrored device: the mini-player drives those
+            // straight at the remote. This precedes the local arm so we never also
+            // start local playback. The reducer left `local_session_active` false
+            // for this play, so riff stays a remote and keeps mirroring.
+            (Device::Local, AppEvent::PlaybackEvent(event))
+                if matches!(
+                    event,
+                    PlaybackEvent::TrackChanged(_) | PlaybackEvent::SourceChanged
+                ) && self.active_remote_device().is_some() =>
+            {
+                // active_remote_device() was just checked as Some.
+                let device_id = self.active_remote_device().unwrap();
+                eprintln!(
+                    "RIFF_CONNECT: play routed REMOTE (active output={device_id}); not playing locally"
+                );
+                self.route_play_to_remote(device_id);
+            }
             (Device::Local, AppEvent::PlaybackEvent(event)) => {
+                // Reached only when riff itself is the active output (no active
+                // remote device): play LOCALLY. This is the unchanged local path;
+                // the reducer set `local_session_active` for this play, so riff
+                // becomes/stays the active output and the mirror yields.
+                if matches!(
+                    event,
+                    PlaybackEvent::TrackChanged(_) | PlaybackEvent::SourceChanged
+                ) {
+                    eprintln!("RIFF_CONNECT: play routed LOCAL (riff is the active output)");
+                }
                 // Keep the player thread's "riff owns the Player" flag in sync with
                 // the app-side local session BEFORE issuing the load/play command,
                 // so the Player-event delegate never mistakes riff's own local

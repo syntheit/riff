@@ -37,6 +37,23 @@ pub enum PlayRequest {
     },
 }
 
+// Flexible body for `PUT /v1/me/player/play?device_id=…` used to START playback
+// on a specific (remote) device. Spotify accepts EITHER `context_uri` (a
+// playlist/album) + `offset`, OR an explicit `uris` track list + `offset`;
+// unset fields are omitted so we can send exactly the shape the caller wants.
+// `position_ms` optionally seeks into the starting track.
+#[derive(Serialize, Default)]
+pub struct PlayContextRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uris: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<PlayOffset>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position_ms: Option<u32>,
+}
+
 // Body for `PUT /v1/me/player` (transfer playback). Only a single device id is
 // supported by the API; `play` controls whether it resumes on transfer.
 #[derive(Serialize)]
