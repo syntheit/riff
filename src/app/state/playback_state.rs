@@ -523,6 +523,17 @@ pub enum PlaybackAction {
     /// receiving, riff's own queue must not drive the Player (transport routes
     /// to Spirc), and Player events are mirrored in for display.
     SetRemoteControlled(bool),
+    /// ANOTHER Connect device took over as the active player (riff lost active
+    /// status). Clears BOTH sticky flags — `local_session_active` and
+    /// `is_remote_controlled` — so the desktop→riff mirror is un-gated and riff
+    /// starts mirroring + controlling the device that took over. Dispatched by
+    /// the player thread on the Spirc deactivation edge (`PlayerEvent::Stopped`
+    /// / `SessionDisconnected` while riff was the active Spirc device), and by
+    /// the low-rate takeover poll when it sees a different device become the
+    /// active player. This is the "yield active-device status" signal. Unlike a
+    /// user PAUSE of riff-as-active (which keeps riff sticky), a takeover means
+    /// riff is no longer the active output at all.
+    YieldToRemote,
 }
 
 impl From<PlaybackAction> for AppAction {
@@ -565,6 +576,11 @@ pub enum PlaybackEvent {
     /// skip to the Spirc handle (Spirc owns the queue) instead of riff's own.
     RemoteNextRequested,
     RemotePrevRequested,
+    /// riff yielded active-device status to another Connect device that took
+    /// over (both sticky flags cleared). The notifier re-enables the OTHER-device
+    /// mirror and forces an immediate `/me/player` re-poll so the UI switches to
+    /// mirroring + controlling the new active device right away.
+    YieldedActiveDevice,
 }
 
 impl From<PlaybackEvent> for AppEvent {
@@ -765,6 +781,22 @@ impl UpdatableState for PlaybackState {
                         || self.current_override.is_some();
                 }
                 vec![PlaybackEvent::RemoteControlChanged(controlled)]
+            }
+            PlaybackAction::YieldToRemote => {
+                // Another device became the active player: riff is no longer the
+                // active output. Drop BOTH sticky flags so `is_mirroring_remote`
+                // (which gates on `!local_session_active`) is un-gated and the
+                // desktop→riff mirror can surface the device that took over. We do
+                // NOT touch the local queue/track here — the mirror snapshot from
+                // the next poll drives the display; keeping the queue lets a later
+                // local play resume cleanly. No-op (no event) when we already hold
+                // neither flag, so a redundant poll/edge doesn't churn the UI.
+                if !self.local_session_active && !self.is_remote_controlled {
+                    return vec![];
+                }
+                self.local_session_active = false;
+                self.is_remote_controlled = false;
+                vec![PlaybackEvent::YieldedActiveDevice]
             }
             PlaybackAction::SwitchDevice(new_device) => {
                 // Explicitly picking a remote Connect device to control means the
@@ -1137,6 +1169,74 @@ mod tests {
             .iter()
             .any(|e| matches!(e, PlaybackEvent::RemoteControlChanged(false))));
         assert!(!state.is_remote_controlled());
+    }
+
+    // Another device takes over while riff was the active (Spirc-driven) player:
+    // YieldToRemote must clear BOTH sticky flags so the desktop mirror re-enables
+    // and, once a remote snapshot is present, riff mirrors the device that took
+    // over. This is the core "yield on takeover" behavior.
+    #[test]
+    fn test_yield_to_remote_clears_sticky_and_remirrors() {
+        let mut state = PlaybackState::default();
+        // Simulate riff being the active local (Spirc) player after a takeover TO
+        // riff: receiver mode set both flags true and parked a mirrored track.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemoteControlled(true)));
+        state.queue(vec![song("mirrored")]);
+        state.play("mirrored");
+        assert!(state.local_session_active());
+        assert!(state.is_remote_controlled());
+        assert!(!state.is_mirroring_remote());
+
+        // The desktop takes over: riff yields active-device status.
+        let events = state.update_with(Cow::Owned(PlaybackAction::YieldToRemote));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, PlaybackEvent::YieldedActiveDevice)));
+        assert!(!state.local_session_active());
+        assert!(!state.is_remote_controlled());
+
+        // A snapshot of the device that took over now mirrors (the gate is open).
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "desktop", "desktop-song", true, 3000,
+        )))));
+        assert!(state.is_mirroring_remote());
+        assert_eq!(
+            state.displayed_song().map(|s| s.id),
+            Some("desktop-song".to_string())
+        );
+        assert_eq!(state.active_remote_device(), Some("desktop".to_string()));
+    }
+
+    // A user PAUSE of riff-as-active must NOT look like a takeover: the sticky
+    // local session is preserved and the mirror stays gated OFF. (The yield path
+    // is only ever driven by an actual deactivation edge / takeover poll, never by
+    // a pause — this asserts the state layer keeps stickiness through a pause so a
+    // spurious YieldToRemote is the only thing that could break it, and there
+    // isn't one on pause.)
+    #[test]
+    fn test_pause_of_active_riff_is_not_a_yield() {
+        let mut state = PlaybackState::default();
+        state.queue(vec![song("local")]);
+        state.update_with(Cow::Owned(PlaybackAction::Load("local".to_string())));
+        assert!(state.local_session_active());
+        // Desktop reports playback; sticky session ignores it.
+        state.update_with(Cow::Owned(PlaybackAction::SetRemotePlayback(Some(remote(
+            "desktop", "desktop-song", true, 3000,
+        )))));
+        // User pauses locally: still sticky, still not mirroring.
+        state.update_with(Cow::Owned(PlaybackAction::Pause));
+        assert!(state.local_session_active());
+        assert!(!state.is_mirroring_remote());
+    }
+
+    // YieldToRemote is a no-op (no event) when riff already holds neither sticky
+    // flag, so a redundant takeover poll / duplicate edge doesn't churn the UI.
+    #[test]
+    fn test_yield_to_remote_noop_when_already_yielded() {
+        let mut state = PlaybackState::default();
+        assert!(state
+            .update_with(Cow::Owned(PlaybackAction::YieldToRemote))
+            .is_empty());
     }
 
     #[test]

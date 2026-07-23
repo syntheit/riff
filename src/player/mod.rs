@@ -157,6 +157,17 @@ impl AppPlayerDelegate {
         self.send(PlaybackAction::SetRemoteControlled(controlled).into())
     }
 
+    /// riff lost active-device status: ANOTHER Connect device took over (Spirc
+    /// deactivated riff — `PlayerEvent::Stopped` / `SessionDisconnected` while
+    /// riff was the active device). Yield: clear both sticky flags so the
+    /// desktop→riff mirror re-enables and riff switches to mirroring +
+    /// controlling the device that took over. The app side also forces an
+    /// immediate `/me/player` re-poll off this.
+    fn yield_active_device(&self) {
+        eprintln!("RIFF_SPIRC: deactivated by takeover — yielding active-device status");
+        self.send(PlaybackAction::YieldToRemote.into())
+    }
+
     /// Mirror the Spirc-driven current track into riff's display queue. We load a
     /// one-song queue and select it, so the existing now-playing UI renders it
     /// with no UI changes. Called on librespot `TrackChanged` while receiving.

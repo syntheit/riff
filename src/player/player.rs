@@ -1203,12 +1203,28 @@ async fn player_setup_delegate(
                 | PlayerEvent::PositionCorrection { position_ms, .. } => {
                     delegate.notify_playback_state(position_ms);
                 }
-                // The remote transferred playback AWAY from riff (or disconnected):
-                // Spirc stopped driving the Player, so leave receiver mode and hand
-                // ownership back to riff's own (now idle) queue.
-                PlayerEvent::Stopped { .. } | PlayerEvent::SessionDisconnected { .. } => {
+                // Spirc stopped driving riff's Player while we were the active
+                // Connect device. This is the DEACTIVATION / TAKEOVER edge: another
+                // device became the active player (librespot's Spirc calls
+                // handle_disconnect()+handle_stop() → emits Stopped +
+                // SessionDisconnected), or the remote that had transferred playback
+                // here stopped entirely. Either way riff is no longer the active
+                // output, so YIELD: clear both sticky flags app-side, re-enable the
+                // OTHER-device mirror, and re-poll /me/player so the UI switches to
+                // the device that took over. A user PAUSE of riff-as-active does NOT
+                // reach here — that's a `Paused` event (mirrored above), so this is
+                // never a spurious yield on pause.
+                PlayerEvent::Stopped { .. } => {
+                    eprintln!("RIFF_SPIRC: receiver deactivated (Stopped) — takeover/stop, yielding");
                     receiving = false;
-                    delegate.set_remote_controlled(false);
+                    delegate.yield_active_device();
+                }
+                PlayerEvent::SessionDisconnected { .. } => {
+                    eprintln!(
+                        "RIFF_SPIRC: receiver deactivated (SessionDisconnected) — takeover/stop, yielding"
+                    );
+                    receiving = false;
+                    delegate.yield_active_device();
                 }
                 // Crucially, do NOT fire riff's own `Next` on EndOfTrack while
                 // receiving — Spirc owns advancing the queue.
@@ -1288,7 +1304,11 @@ fn song_from_audio_item(item: &AudioItem) -> Option<SongDescription> {
 
 /// The name riff advertises as a Spotify Connect device. Prefers `RIFF_SPIRC_NAME`,
 /// then the system hostname as "riff (<host>)", falling back to plain "riff".
-fn connect_device_name() -> String {
+///
+/// Also used by the takeover-watch poll to recognize riff's OWN device in
+/// `GET /me/player` (so "riff is the active device, just paused" is NOT mistaken
+/// for another device taking over).
+pub fn connect_device_name() -> String {
     if let Ok(name) = env::var("RIFF_SPIRC_NAME") {
         if !name.trim().is_empty() {
             return name;

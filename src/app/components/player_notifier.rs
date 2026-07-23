@@ -449,15 +449,29 @@ impl PlayerNotifier {
         self.send_command_to_connect_player(ConnectCommand::SetRemoteMirrorActive(active));
     }
 
+    // Turn the low-rate TAKEOVER-watch poll on/off. It runs while riff is on its
+    // local device AND holds a local session — exactly when the mirror is idle —
+    // to notice another device taking over (safety net for the Spirc push edge).
+    fn set_takeover_watch(&self, active: bool) {
+        eprintln!("RIFF_CONNECT: set_takeover_watch({active})");
+        self.send_command_to_connect_player(ConnectCommand::SetTakeoverWatchActive(active));
+    }
+
     // Decide + push the mirror state from current app state: active only when the
     // active device is Local and riff does NOT own a local session. Gating on the
     // sticky `local_session_active` (rather than raw play-state) is what stops a
     // local PAUSE from re-enabling the mirror and yanking the user back to the
-    // desktop. When a local session is active the mirror poll idles (battery).
+    // desktop. When a local session is active the mirror poll idles (battery) and
+    // the TAKEOVER-watch takes over instead — it's the exact inverse: it polls at
+    // a low rate WHILE riff is the sticky local output, purely to catch another
+    // device becoming active (so riff yields). Mirror and watch are never both on.
     fn refresh_remote_mirror(&self) {
         let is_local = matches!(&*self.device(), Device::Local);
-        let active = is_local && !self.local_session_active();
-        self.set_remote_mirror(active);
+        let owns_local = self.local_session_active();
+        let mirror = is_local && !owns_local;
+        self.set_remote_mirror(mirror);
+        // Watch for a takeover only while we're the sticky local output on Local.
+        self.set_takeover_watch(is_local && owns_local);
     }
 
     // Force an immediate re-poll of remote playback (without changing the mirror
@@ -562,6 +576,21 @@ impl EventListener for PlayerNotifier {
                 // While receiving, riff (via Spirc) owns local playback, so
                 // local_owns_player = false only when NOT receiving.
                 self.send_command_to_local_player(Command::SetLocalOwnsPlayer(!controlled));
+                self.refresh_remote_mirror();
+            }
+            // riff yielded active-device status because ANOTHER Connect device took
+            // over. Both sticky flags were just cleared, so: tell the player thread
+            // riff no longer owns the local Player (any further librespot events are
+            // not riff's own queue), then re-enable the OTHER-device mirror. Because
+            // `refresh_remote_mirror` pushes `SetRemoteMirrorActive(true)` — which
+            // polls `/me/player` ONCE immediately in the connect handler — this is
+            // the immediate re-poll that switches the UI to the device that took
+            // over without waiting for the next ~4s tick.
+            (_, AppEvent::PlaybackEvent(PlaybackEvent::YieldedActiveDevice)) => {
+                eprintln!(
+                    "RIFF_CONNECT: notifier YieldedActiveDevice — enabling mirror + immediate re-poll"
+                );
+                self.send_command_to_local_player(Command::SetLocalOwnsPlayer(false));
                 self.refresh_remote_mirror();
             }
             // While riff is a Connect RECEIVER, route ALL transport to the Spirc
