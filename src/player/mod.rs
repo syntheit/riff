@@ -49,6 +49,37 @@ pub enum Command {
     SpircSeek(u32),
     /// Volume as a 0.0..=1.0 fraction; scaled to librespot's u16 range.
     SpircSetVolume(f64),
+    // --- LOCAL play announced THROUGH Spirc (Half-B: announce) ------------
+    // The user initiated playback IN riff and riff is the intended output. We
+    // drive it THROUGH Spirc (activate + load) so Spirc owns the play_request_id
+    // and reports riff as the active device to other Spotify apps — while still
+    // loading into the SHARED Player so riff HEARS the audio. If Spirc isn't
+    // running the player thread FALLS BACK to the bare Player using `fallback`,
+    // so local audio never depends on Spirc being online.
+    //
+    // A playlist/album (has a Spotify context) loads via `context_uri` + offset.
+    SpircLoadContext {
+        context_uri: String,
+        /// Offset of the tapped track within the context.
+        offset: usize,
+        /// Track uri to seek to inside the context (robust to reordering); the
+        /// player uses this as the `playing_track`, with `offset` as fallback.
+        playing_track_uri: Option<String>,
+        /// Whether to start playing immediately (vs. load paused).
+        start_playing: bool,
+        /// Bare-Player fallback: the tapped track to load directly if Spirc is
+        /// offline, so local audio still works.
+        fallback: SpotifyUri,
+    },
+    // An ad-hoc list (radio / Liked Songs / search / arbitrary queue — no context
+    // uri) loads via an explicit `uris` track list + offset.
+    SpircLoadTracks {
+        uris: Vec<String>,
+        offset: usize,
+        start_playing: bool,
+        /// Bare-Player fallback (the tapped track) if Spirc is offline.
+        fallback: SpotifyUri,
+    },
     /// Tell the player thread whether riff currently owns a LOCAL playback
     /// session (user played something in riff's own queue). The Player-event
     /// delegate reads this to decide, for an incoming librespot event, whether it

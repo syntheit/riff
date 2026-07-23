@@ -13,7 +13,9 @@ use librespot::metadata::{Metadata, Track};
 // Spotify Connect RECEIVER: make riff a controllable Connect device via
 // librespot's Spirc, spawned on top of riff's existing authenticated Session +
 // Player + Mixer. See riff-connect.md §4 (Half B).
-use librespot::connect::{ConnectConfig, Spirc};
+use librespot::connect::{
+    ConnectConfig, LoadRequest, LoadRequestOptions, PlayingTrack, Spirc,
+};
 
 use librespot::playback::mixer::softmixer::SoftMixer;
 use librespot::playback::mixer::{Mixer, MixerConfig};
@@ -359,6 +361,74 @@ impl SpotifyPlayer {
             Command::SpircSetVolume(fraction) => {
                 let volume = (fraction.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
                 self.spirc_do("set_volume", |s| s.set_volume(volume));
+                Ok(())
+            }
+            // --- LOCAL play announced THROUGH Spirc --------------------------
+            // Playlist/album (Spotify context): load by `context_uri` + offset so
+            // Spotify shows riff playing FROM that playlist/album. Prefer the track
+            // uri as the `playing_track` (robust to context reordering), with the
+            // numeric offset as a fallback index. If Spirc is offline the helper
+            // falls back to the bare Player track so local audio still plays.
+            Command::SpircLoadContext {
+                context_uri,
+                offset,
+                playing_track_uri,
+                start_playing,
+                fallback,
+            } => {
+                let playing_track = playing_track_uri
+                    .clone()
+                    .map(PlayingTrack::Uri)
+                    .or(Some(PlayingTrack::Index(offset as u32)));
+                let options = LoadRequestOptions {
+                    start_playing,
+                    seek_to: 0,
+                    context_options: None,
+                    playing_track,
+                };
+                let request =
+                    LoadRequest::from_context_uri(context_uri.clone(), options);
+                let ctx = context_uri.clone();
+                let track = playing_track_uri.clone();
+                self.spirc_load_local(
+                    "context",
+                    request,
+                    move || format!("context_uri={ctx} offset={offset} track={track:?}"),
+                    fallback,
+                    start_playing,
+                );
+                Ok(())
+            }
+            // Ad-hoc list (radio / Liked Songs / search / arbitrary queue — no
+            // context uri): load an explicit `uris` track list + offset. librespot
+            // 0.8 supports this via `LoadRequest::from_tracks`, so these sources ARE
+            // announced too (not deferred). Offset picks the tapped track.
+            Command::SpircLoadTracks {
+                uris,
+                offset,
+                start_playing,
+                fallback,
+            } => {
+                let playing_track = uris
+                    .get(offset)
+                    .cloned()
+                    .map(PlayingTrack::Uri)
+                    .or(Some(PlayingTrack::Index(offset as u32)));
+                let options = LoadRequestOptions {
+                    start_playing,
+                    seek_to: 0,
+                    context_options: None,
+                    playing_track,
+                };
+                let len = uris.len();
+                let request = LoadRequest::from_tracks(uris, options);
+                self.spirc_load_local(
+                    "tracks",
+                    request,
+                    move || format!("uris={len} offset={offset}"),
+                    fallback,
+                    start_playing,
+                );
                 Ok(())
             }
             Command::SetLocalOwnsPlayer(owns) => {
@@ -777,6 +847,89 @@ impl SpotifyPlayer {
                 }
             }
             None => eprintln!("RIFF_SPIRC: {what} ignored — no Spirc running"),
+        }
+    }
+
+    /// Route a LOCAL play THROUGH Spirc so it announces riff as the active device.
+    ///
+    /// When Spirc is online: `activate()` (acquire control as the active Connect
+    /// device) then `load(request)` (load into the SHARED Player, so riff still
+    /// HEARS the audio, AND Spirc owns the play_request_id → reports riff active to
+    /// Spotify). Both go through Spirc's single serialized command channel, so the
+    /// activate is guaranteed to run before the load. Because Spirc now drives the
+    /// shared Player, this play is a RECEIVER-mode play from the Player-event
+    /// delegate's view — so we clear `local_owns_player` (mirror it, let Spirc
+    /// advance the queue), exactly like a remote transfer. The existing Half-B
+    /// mirror then reflects it in riff's own now-playing/mini-player.
+    ///
+    /// When Spirc is OFFLINE (disabled / failed to start): FALL BACK to the bare
+    /// Player using `fallback`, and set `local_owns_player = true` so riff owns its
+    /// own queue as before. This guarantees local audio never depends on Spirc.
+    ///
+    /// `what` is a short label for logging; `describe` renders the load target.
+    fn spirc_load_local(
+        &mut self,
+        what: &str,
+        request: LoadRequest,
+        describe: impl FnOnce() -> String,
+        fallback: SpotifyUri,
+        start_playing: bool,
+    ) {
+        // Attempt the activate + load against the Spirc handle in a scope that
+        // releases the `&self.spirc` borrow before any `&mut self` fallback call.
+        // `None`  -> Spirc absent (fall back). `Some(true)` -> announced OK.
+        // `Some(false)` -> Spirc present but a call errored (fall back).
+        let announced = match self.spirc.as_ref() {
+            Some(spirc) => {
+                eprintln!(
+                    "RIFF_SPIRC: local play routed THROUGH Spirc ({what}) {}",
+                    describe()
+                );
+                if let Err(e) = spirc.activate() {
+                    eprintln!("RIFF_SPIRC: activate failed ({what}): {e} — falling back to bare Player");
+                    Some(false)
+                } else {
+                    eprintln!("RIFF_SPIRC: activate ({what})");
+                    if let Err(e) = spirc.load(request) {
+                        eprintln!("RIFF_SPIRC: load failed ({what}): {e} — falling back to bare Player");
+                        Some(false)
+                    } else {
+                        Some(true)
+                    }
+                }
+            }
+            None => None,
+        };
+
+        match announced {
+            Some(true) => {
+                // Spirc now drives the shared Player: the event delegate must treat
+                // this as receiver-mode (mirror only, no double Next), exactly like
+                // a remote transfer. Clear ownership AFTER a successful load — the
+                // first emitted event (Loading/Playing) is what flips the mirror on.
+                self.local_owns_player.store(false, Ordering::Relaxed);
+            }
+            _ => {
+                eprintln!(
+                    "RIFF_SPIRC: FALLBACK to bare Player ({what}) — local audio preserved"
+                );
+                self.spirc_load_fallback(what, fallback, start_playing);
+            }
+        }
+    }
+
+    /// Bare-Player fallback for `spirc_load_local`: load `track` directly into the
+    /// Player (the pre-Half-B-announce path), and mark riff as owning its own
+    /// queue so the event delegate advances it normally. Used whenever Spirc is
+    /// absent or an `activate`/`load` call errors — so local audio always plays.
+    fn spirc_load_fallback(&mut self, what: &str, track: SpotifyUri, start_playing: bool) {
+        self.local_owns_player.store(true, Ordering::Relaxed);
+        match self.get_player_mut() {
+            Ok(player) => {
+                eprintln!("RIFF_SPIRC: bare-Player fallback load ({what}) {track}");
+                player.load(track, start_playing, 0);
+            }
+            Err(_) => eprintln!("RIFF_SPIRC: fallback load ({what}) skipped — player not ready"),
         }
     }
 

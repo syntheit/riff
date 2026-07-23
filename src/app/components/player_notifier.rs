@@ -246,23 +246,35 @@ impl PlayerNotifier {
             PlaybackEvent::PlaybackResumed => Some(Command::PlayerResume),
             PlaybackEvent::PlaybackStopped => Some(Command::PlayerStop),
             PlaybackEvent::VolumeSet(volume) => Some(Command::PlayerSetVolume(*volume)),
+            // A (re)load initiated locally: route it THROUGH Spirc so riff is
+            // announced as the active device, with a bare-Player fallback baked in
+            // (the player thread uses that if Spirc is offline). `resume: true` —
+            // a local TrackChanged is a user-initiated play.
             PlaybackEvent::TrackChanged(id) => {
                 info!("track changed: {}", id);
-                SpotifyId::from_base62(id)
-                    .ok()
-                    .map(|track| Command::PlayerLoad {
-                        track: SpotifyUri::Track { id: track },
-                        resume: true,
+                self.local_load_command(true)
+                    // Extremely defensive: if we somehow can't build the announced
+                    // command (no current song), fall back to the bare load so
+                    // audio never silently drops.
+                    .or_else(|| {
+                        SpotifyId::from_base62(id).ok().map(|track| {
+                            Command::PlayerLoad {
+                                track: SpotifyUri::Track { id: track },
+                                resume: true,
+                            }
+                        })
                     })
             }
             PlaybackEvent::SourceChanged => {
                 let resume = self.is_playing();
-                self.currently_playing()
-                    .and_then(|c| SpotifyId::from_base62(c.song_id()).ok())
-                    .map(|track| Command::PlayerLoad {
-                        track: SpotifyUri::Track { id: track },
-                        resume,
-                    })
+                self.local_load_command(resume).or_else(|| {
+                    self.currently_playing()
+                        .and_then(|c| SpotifyId::from_base62(c.song_id()).ok())
+                        .map(|track| Command::PlayerLoad {
+                            track: SpotifyUri::Track { id: track },
+                            resume,
+                        })
+                })
             }
             PlaybackEvent::TrackSeeked(position) => Some(Command::PlayerSeek(*position)),
             PlaybackEvent::Preload(id) => SpotifyId::from_base62(id)
@@ -275,6 +287,68 @@ impl PlayerNotifier {
         if let Some(command) = command {
             self.send_command_to_local_player(command);
         }
+    }
+
+    // Build the LOCAL-play command that announces riff as the active device via
+    // Spirc, from what riff just loaded. Mirrors the source mapping of
+    // `route_play_to_remote`, but targets riff's OWN Spirc handle (activate + load
+    // into the shared Player) instead of the Web API:
+    //   - a playlist/album source (has a Spotify context uri) -> `context_uri` +
+    //     offset to the tapped track (`SpircLoadContext`);
+    //   - anything else (radio / Liked Songs / search / ad-hoc queue) -> an
+    //     explicit `uris` list + offset (`SpircLoadTracks`).
+    // Each carries a bare-Player `fallback` (the tapped track) so the player thread
+    // can preserve local audio when Spirc is offline. Returns `None` only when
+    // there's nothing to play, or the tapped song id isn't a valid base62 track id
+    // (so the fallback can't be built) — the caller then bare-loads.
+    fn local_load_command(&self, start_playing: bool) -> Option<Command> {
+        // Spotify caps the explicit `uris` list; window a large list around the
+        // offset before capping so the tapped track stays in range. Same bound as
+        // `route_play_to_remote`.
+        const MAX_URIS: usize = 500;
+        let playing = self.currently_playing()?;
+        // The tapped track id -> bare-Player fallback uri. If it isn't a valid
+        // track id we can't build a safe fallback, so bail to the caller's path.
+        let fallback_id = SpotifyId::from_base62(playing.song_id()).ok()?;
+        let fallback = SpotifyUri::Track { id: fallback_id };
+
+        let command = match playing {
+            CurrentlyPlaying::WithSource {
+                source,
+                offset,
+                song,
+            } => {
+                // has_spotify_uri() guaranteed the uri exists for these sources.
+                let context_uri = source.spotify_uri()?;
+                Command::SpircLoadContext {
+                    context_uri,
+                    offset,
+                    playing_track_uri: Some(format!("spotify:track:{song}")),
+                    start_playing,
+                    fallback,
+                }
+            }
+            CurrentlyPlaying::Songs { songs, offset } => {
+                let (window, offset) = if songs.len() > MAX_URIS {
+                    let start = offset.min(songs.len().saturating_sub(MAX_URIS));
+                    let end = (start + MAX_URIS).min(songs.len());
+                    (songs[start..end].to_vec(), offset - start)
+                } else {
+                    (songs, offset)
+                };
+                let uris = window
+                    .into_iter()
+                    .map(|id| format!("spotify:track:{id}"))
+                    .collect::<Vec<_>>();
+                Command::SpircLoadTracks {
+                    uris,
+                    offset,
+                    start_playing,
+                    fallback,
+                }
+            }
+        };
+        Some(command)
     }
 
     // RECEIVER mode: riff is the active Connect device (a remote app transferred
@@ -535,19 +609,19 @@ impl EventListener for PlayerNotifier {
                     eprintln!("RIFF_CONNECT: play routed LOCAL (riff is the active output)");
                 }
                 // Keep the player thread's "riff owns the Player" flag in sync with
-                // the app-side local session BEFORE issuing the load/play command,
-                // so the Player-event delegate never mistakes riff's own local
-                // playback (fires Next at end-of-track) for Spirc-driven receiver
-                // playback. Both commands share one serialized command loop, so
-                // sending ownership first guarantees the atomic is set before
-                // `player.load()` fires its events.
+                // the app-side local session for TRANSPORT-only events (pause /
+                // resume / stop). For a (re)LOAD (TrackChanged / SourceChanged) we
+                // do NOT sync ownership here: those now route THROUGH Spirc (see
+                // `local_load_command`), and the SpircLoad* command on the player
+                // thread is the SOLE authority on `local_owns_player` — it clears it
+                // when Spirc drives the shared Player (so the event delegate mirrors
+                // it, no double Next) or sets it when it falls back to the bare
+                // Player. Sending SetLocalOwnsPlayer(true) here would fight that.
                 if matches!(
                     event,
                     PlaybackEvent::PlaybackResumed
                         | PlaybackEvent::PlaybackPaused
                         | PlaybackEvent::PlaybackStopped
-                        | PlaybackEvent::TrackChanged(_)
-                        | PlaybackEvent::SourceChanged
                 ) {
                     self.sync_local_ownership();
                 }
