@@ -334,7 +334,7 @@ impl CachedSpotifyClient {
             Ok(t) => Ok(t),
             // parsing failed: cache is likely invalid, request again, ignoring cache
             Err(e) => {
-                dbg!(&cache_key, e);
+                warn!("cache parse failed for {cache_key:?}, refetching: {e}");
                 let new_raw = self
                     .cache
                     .get_or_write(&cache_key, CachePolicy::IgnoreCached, |etag| {

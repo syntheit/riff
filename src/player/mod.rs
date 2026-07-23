@@ -86,6 +86,19 @@ pub enum Command {
     /// is riff's own local playback (drive riff's queue: fire Next at end-of-track)
     /// or Spirc-driven receiver playback (mirror only, let Spirc advance).
     SetLocalOwnsPlayer(bool),
+    /// WATCHDOG for a Spirc-routed local play (see `spirc_load_local`). Emitted by
+    /// a timer the player arms after handing a local load to Spirc: `Spirc::load()`
+    /// returns `Ok` as soon as the command is QUEUED, and the real load can still
+    /// fail later inside the Spirc task (network / context resolve / bad track),
+    /// which librespot only debug-logs — leaving riff silent. If no confirming
+    /// Player event arrived within the timeout, this fires the bare-Player
+    /// `fallback` so audio always happens. `generation` guards against races: it
+    /// only fires if it is still the pending load (not confirmed, not superseded).
+    SpircLoadWatchdog {
+        generation: u64,
+        fallback: SpotifyUri,
+        start_playing: bool,
+    },
 }
 
 #[derive(Clone)]

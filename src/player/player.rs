@@ -42,8 +42,15 @@ use crate::settings::RiffSettings;
 use std::env;
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How long to wait for a Spirc-routed local load to produce a confirming Player
+/// event before falling back to the bare Player. `Spirc::load()` returns on
+/// enqueue, and the real load runs later in the Spirc task; if it silently fails
+/// this timeout guarantees riff still produces audio via the bare fallback.
+const SPIRC_LOAD_CONFIRM_TIMEOUT: Duration = Duration::from_secs(4);
 
 #[derive(Debug)]
 pub enum SpotifyError {
@@ -222,6 +229,12 @@ pub struct SpotifyPlayer {
     // leak). Both are torn down together.
     spirc: Option<Spirc>,
     spirc_task: Option<tokio::task::JoinHandle<()>>,
+    // JoinHandle of the detached Web-API token-refresh loop spawned by
+    // `initial_login`. Stored so we can abort a prior loop before spawning a new
+    // one (initial_login runs more than once per process — Restore, CompleteLogin,
+    // retries) and on Logout, instead of leaking a duplicate loop that races on
+    // the TokenStore.
+    token_refresh_task: Option<tokio::task::JoinHandle<()>>,
     // Shared flag read by the Player-event delegate: TRUE while riff owns a LOCAL
     // playback session (its own queue drives the Player), FALSE otherwise. When a
     // librespot Player event arrives and this is FALSE, it must be Spirc-driven
@@ -229,6 +242,19 @@ pub struct SpotifyPlayer {
     // firing riff's own `Next` at end-of-track. Set by `Command::SetLocalOwnsPlayer`
     // from `PlayerNotifier`, mirroring the app-side `local_session_active`.
     local_owns_player: Arc<AtomicBool>,
+    // Coordination for a Spirc-routed local play awaiting confirmation. When riff
+    // hands a local load to Spirc, `Spirc::load()` returns `Ok` on QUEUE, not on
+    // success — the real load can still fail later inside the Spirc task (silent
+    // audio). So instead of eagerly assuming success we keep `local_owns_player`
+    // TRUE (riff-owns) and store the load's GENERATION here (nonzero = a Spirc load
+    // is in flight). The Player-event delegate, on the FIRST confirming event
+    // (Loading/Playing/TrackChanged), flips to receiver-mode and zeroes this
+    // (confirmed). A watchdog armed for the same generation runs the bare-Player
+    // fallback iff this still equals its generation when it fires (not confirmed,
+    // not superseded) — guaranteeing a local play always ends in audio.
+    spirc_pending_gen: Arc<AtomicU64>,
+    // Monotonic source for the generation above (never 0; 0 means "none pending").
+    spirc_load_seq: u64,
 
     // Shared equalizer configuration, updated live without recreating the player.
     eq_controller: EqController,
@@ -273,7 +299,10 @@ impl SpotifyPlayer {
             session: None,
             spirc: None,
             spirc_task: None,
+            token_refresh_task: None,
             local_owns_player: Arc::new(AtomicBool::new(false)),
+            spirc_pending_gen: Arc::new(AtomicU64::new(0)),
+            spirc_load_seq: 0,
             eq_controller,
             mono_controller,
             pan_controller,
@@ -439,6 +468,37 @@ impl SpotifyPlayer {
                 self.local_owns_player.store(owns, Ordering::Relaxed);
                 Ok(())
             }
+            Command::SpircLoadWatchdog {
+                generation,
+                fallback,
+                start_playing,
+            } => {
+                // The Spirc-routed local load with this generation did NOT confirm
+                // (no Loading/Playing/TrackChanged event) within the timeout. If it
+                // is STILL the pending generation, the load silently failed (or is
+                // stuck) — run the bare-Player fallback so audio always happens.
+                // Use compare_exchange so we consume the pending state exactly once:
+                //   * gen still pending -> swap to 0 and fall back (Spirc lost).
+                //   * gen already 0 (confirmed) or a different value (superseded by
+                //     a newer load) -> do nothing; that load owns the outcome.
+                let claimed = self
+                    .spirc_pending_gen
+                    .compare_exchange(
+                        generation,
+                        0,
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                    )
+                    .is_ok();
+                if claimed {
+                    warn!(
+                        "spirc load did not confirm within {:?}; falling back to bare player",
+                        SPIRC_LOAD_CONFIRM_TIMEOUT
+                    );
+                    self.spirc_load_fallback("watchdog", fallback, start_playing);
+                }
+                Ok(())
+            }
             Command::PlayerResume => {
                 self.get_player()?.play();
                 Ok(())
@@ -528,6 +588,11 @@ impl SpotifyPlayer {
             }
             Command::Logout => {
                 self.oauth_client.clear_credentials().await;
+                // Stop the Web-API token-refresh loop so it doesn't keep running
+                // (and spinning on the now-cleared store) after logout.
+                if let Some(task) = self.token_refresh_task.take() {
+                    task.abort();
+                }
                 // Tear down the Connect receiver first so it stops advertising the
                 // device and doesn't outlive the Session.
                 self.shutdown_spirc();
@@ -621,6 +686,7 @@ impl SpotifyPlayer {
                     new_player.get_player_event_channel(),
                     self.delegate.clone(),
                     Arc::clone(&self.local_owns_player),
+                    Arc::clone(&self.spirc_pending_gen),
                 ));
                 self.player.replace(new_player);
                 self.session.replace(new_session);
@@ -703,6 +769,19 @@ impl SpotifyPlayer {
 
         let creds = Credentials::with_access_token(&credentials.access_token);
 
+        // Re-login can run while a PRIOR session is still live (this method runs
+        // more than once per process: Restore, CompleteLogin, retries). Building a
+        // second session without tearing the first down would leave TWO connected
+        // sessions on the account (the "unable to load track" streaming bump). So,
+        // mirroring `ReloadSettings`, shut the receiver + old session down FIRST —
+        // done HERE (after premium is confirmed, right before we build the fresh
+        // session) rather than at the top of the method, so a transient premium
+        // probe failure that returns early does NOT orphan a working session.
+        self.shutdown_spirc();
+        if let Some(old_session) = self.session.take() {
+            old_session.shutdown();
+        }
+
         // ONE session per login. Build it UNCONNECTED. The audio `Player` is bound
         // to it now (Player construction needs no live connection); the SINGLE
         // `connect()` happens below — performed BY Spirc when the receiver is
@@ -719,6 +798,7 @@ impl SpotifyPlayer {
             new_player.get_player_event_channel(),
             self.delegate.clone(),
             Arc::clone(&self.local_owns_player),
+            Arc::clone(&self.spirc_pending_gen),
         ));
         self.player.replace(new_player);
         self.session.replace(new_session);
@@ -746,15 +826,23 @@ impl SpotifyPlayer {
         // does NOT touch the librespot session: librespot keeps streaming across
         // Web-API token refreshes, and its connection is single-use (OnceLock), so
         // reconnecting here would ERROR and is unnecessary.
+        //
+        // `initial_login` runs more than once per process (Restore, CompleteLogin,
+        // retries), so abort any prior refresh loop before spawning a new one —
+        // otherwise multiple loops race on the shared TokenStore. The handle is
+        // stored (like `spirc_task`) so `Logout` can abort it too.
+        if let Some(prev) = self.token_refresh_task.take() {
+            prev.abort();
+        }
         let oauth_client = Arc::clone(&self.oauth_client);
-        tokio::task::spawn(async move {
+        self.token_refresh_task = Some(tokio::task::spawn(async move {
             loop {
                 if oauth_client.refresh_token_at_expiry().await.is_err() {
                     // Logged out / no refresh token: stop the loop rather than spin.
                     break;
                 }
             }
-        });
+        }));
 
         self.delegate.token_login_successful(username);
 
@@ -851,6 +939,22 @@ impl SpotifyPlayer {
     /// Player using `fallback`, and set `local_owns_player = true` so riff owns its
     /// own queue as before. This guarantees local audio never depends on Spirc.
     ///
+    /// CRITICAL: `Spirc::load()` returns `Ok` as soon as the load command is
+    /// QUEUED on Spirc's serialized channel — NOT when the track actually starts.
+    /// The real load runs later inside the Spirc task and can still fail
+    /// (network / context-resolve / invalid track), which librespot only
+    /// `debug!`-logs. So we must NOT assume success on `load()==Ok`. Instead:
+    ///   * Keep `local_owns_player = TRUE` (riff-owns) for now. The Player-event
+    ///     delegate flips it to receiver-mode only when the FIRST real confirming
+    ///     Player event (Loading/Playing/TrackChanged) proves Spirc actually
+    ///     started playing what we asked (see `spirc_pending_gen` in
+    ///     `player_setup_delegate`).
+    ///   * Arm a WATCHDOG: if no confirming event arrives within
+    ///     `SPIRC_LOAD_CONFIRM_TIMEOUT`, run the bare-Player `fallback` so audio
+    ///     always happens. The confirming event and the watchdog are mutually
+    ///     exclusive via the load GENERATION: confirmation zeroes the pending gen
+    ///     (watchdog then no-ops), and a newer load supersedes an older watchdog.
+    ///
     /// `what` is a short label for logging; `describe` renders the load target.
     fn spirc_load_local(
         &mut self,
@@ -879,13 +983,42 @@ impl SpotifyPlayer {
 
         match announced {
             Some(true) => {
-                // Spirc now drives the shared Player: the event delegate must treat
-                // this as receiver-mode (mirror only, no double Next), exactly like
-                // a remote transfer. Clear ownership AFTER a successful load — the
-                // first emitted event (Loading/Playing) is what flips the mirror on.
-                self.local_owns_player.store(false, Ordering::Relaxed);
+                debug!("spirc load ({what}) queued: {}", describe());
+                // Allocate a fresh generation for this in-flight load and publish
+                // it so (a) the delegate can confirm it and (b) the watchdog can
+                // tell whether it's still the pending load. A newer load bumps the
+                // gen, which both cancels an older watchdog and re-arms confirmation.
+                self.spirc_load_seq = self.spirc_load_seq.wrapping_add(1);
+                if self.spirc_load_seq == 0 {
+                    // Never use 0: it means "nothing pending".
+                    self.spirc_load_seq = 1;
+                }
+                let generation = self.spirc_load_seq;
+
+                // Do NOT flip to receiver-mode yet. Keep riff owning the Player
+                // until a confirming Player event flips it (deferred ownership).
+                self.local_owns_player.store(true, Ordering::Relaxed);
+                self.spirc_pending_gen.store(generation, Ordering::Relaxed);
+
+                // Arm the watchdog: after the timeout, ask the player thread to run
+                // the fallback IFF this generation is still pending (unconfirmed,
+                // not superseded). Runs on the player command channel so the
+                // fallback executes with `&mut self`.
+                let sender = self.command_sender.clone();
+                tokio::task::spawn(async move {
+                    tokio::time::sleep(SPIRC_LOAD_CONFIRM_TIMEOUT).await;
+                    let _ = sender.unbounded_send(Command::SpircLoadWatchdog {
+                        generation,
+                        fallback,
+                        start_playing,
+                    });
+                });
             }
             _ => {
+                // Spirc absent or the activate/load call errored synchronously:
+                // fall back to the bare Player immediately. Clear any pending gen
+                // so an earlier watchdog can't double-load on top of this.
+                self.spirc_pending_gen.store(0, Ordering::Relaxed);
                 self.spirc_load_fallback(what, fallback, start_playing);
             }
         }
@@ -896,6 +1029,11 @@ impl SpotifyPlayer {
     /// queue so the event delegate advances it normally. Used whenever Spirc is
     /// absent or an `activate`/`load` call errors — so local audio always plays.
     fn spirc_load_fallback(&mut self, what: &str, track: SpotifyUri, start_playing: bool) {
+        debug!("spirc load fallback ({what}): bare player load");
+        // riff owns its own queue on the bare path. Also zero any pending Spirc
+        // confirmation so the Player events THIS load emits are treated as local
+        // (not mistaken for a Spirc confirmation that flips to receiver-mode).
+        self.spirc_pending_gen.store(0, Ordering::Relaxed);
         self.local_owns_player.store(true, Ordering::Relaxed);
         match self.get_player_mut() {
             Ok(player) => {
@@ -1109,7 +1247,7 @@ fn build_unconnected_session(ap_port: Option<u16>) -> Session {
         Some(root.join("audio")),
         None,
     )
-    .map_err(|e| dbg!(e))
+    .map_err(|e| warn!("failed to open librespot cache: {e}"))
     .ok();
     Session::new(session_config, cache)
 }
@@ -1118,6 +1256,7 @@ async fn player_setup_delegate(
     mut channel: PlayerEventChannel,
     delegate: AppPlayerDelegate,
     local_owns_player: Arc<AtomicBool>,
+    spirc_pending_gen: Arc<AtomicU64>,
 ) {
     // Tracks whether we last told the app it was in receiver (Spirc-driven) mode,
     // so we only emit `set_remote_controlled` on an actual edge.
@@ -1128,7 +1267,7 @@ async fn player_setup_delegate(
         // events are riff's own local playback (drive the queue). Otherwise a
         // remote app transferred playback here and Spirc is driving the Player —
         // we MIRROR its events and must NOT fire riff's own `Next`.
-        let owns_local = local_owns_player.load(Ordering::Relaxed);
+        let mut owns_local = local_owns_player.load(Ordering::Relaxed);
 
         // Detect the receiver-mode edge from Player activity we didn't originate.
         let spirc_active_event = matches!(
@@ -1137,6 +1276,22 @@ async fn player_setup_delegate(
                 | PlayerEvent::Playing { .. }
                 | PlayerEvent::Loading { .. }
         );
+
+        // DEFERRED-OWNERSHIP CONFIRMATION (CRITICAL-1): a local play routed through
+        // Spirc keeps `local_owns_player = TRUE` until its FIRST real Player event
+        // proves Spirc actually started. When a Spirc load is pending
+        // (`spirc_pending_gen != 0`) and a confirming event arrives, flip ownership
+        // to receiver-mode HERE and consume the pending gen (which also cancels the
+        // watchdog: it compare_exchange's the same gen and finds it gone). We
+        // consume the gen exactly once via swap so only the first confirming event
+        // performs the flip.
+        if spirc_active_event && spirc_pending_gen.swap(0, Ordering::Relaxed) != 0 {
+            // Spirc confirmed it owns the Player: this and subsequent events are
+            // receiver-mode (mirror only, no double Next).
+            local_owns_player.store(false, Ordering::Relaxed);
+            owns_local = false;
+        }
+
         if !owns_local && spirc_active_event && !receiving {
             receiving = true;
             delegate.set_remote_controlled(true);
@@ -1167,21 +1322,23 @@ async fn player_setup_delegate(
                 | PlayerEvent::PositionCorrection { position_ms, .. } => {
                     delegate.notify_playback_state(position_ms);
                 }
-                // Spirc stopped driving riff's Player while we were the active
-                // Connect device. This is the DEACTIVATION / TAKEOVER edge: another
-                // device became the active player (librespot's Spirc calls
-                // handle_disconnect()+handle_stop() → emits Stopped +
-                // SessionDisconnected), or the remote that had transferred playback
-                // here stopped entirely. Either way riff is no longer the active
-                // output, so YIELD: clear both sticky flags app-side, re-enable the
-                // OTHER-device mirror, and re-poll /me/player so the UI switches to
-                // the device that took over. A user PAUSE of riff-as-active does NOT
-                // reach here — that's a `Paused` event (mirrored above), so this is
-                // never a spurious yield on pause.
+                // `Stopped` is AMBIGUOUS: it fires both when another device takes
+                // over AND for plain non-takeover reasons while riff is STILL the
+                // active device — end of the remote-driven queue, a load failure, or
+                // a remote "stop". Yielding here on every `Stopped` caused a spurious
+                // yield at end-of-queue (HIGH-4). So do NOT yield on `Stopped`:
+                // reflect a stopped/paused state in the mirror and STAY in receiver
+                // mode. The takeover-watch poll (`poll_takeover`, /me/player, now
+                // debounced) is the authority on an actual takeover — it yields only
+                // once it confirms ANOTHER device is really the active player.
                 PlayerEvent::Stopped { .. } => {
-                    receiving = false;
-                    delegate.yield_active_device();
+                    delegate.mirror_remote_playing(false);
                 }
+                // `SessionDisconnected` is UNAMBIGUOUS: the Spirc session for this
+                // device was torn down — a definite deactivation/takeover. YIELD:
+                // clear the sticky flags app-side, re-enable the OTHER-device mirror,
+                // and re-poll /me/player so the UI switches to the device that took
+                // over.
                 PlayerEvent::SessionDisconnected { .. } => {
                     receiving = false;
                     delegate.yield_active_device();

@@ -1,7 +1,8 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
 use futures::channel::mpsc::UnboundedSender;
 use gettextrs::gettext;
@@ -67,7 +68,23 @@ pub struct ConnectPlayer {
     // riff itself in `GET /me/player` so "riff is active, just paused" is not
     // mistaken for another device taking over. Computed once at startup.
     own_device_name: String,
+    // TAKEOVER-watch debounce state. `/me/player` is EVENTUALLY consistent: right
+    // after riff announces a local play through Spirc, a poll may still report the
+    // OLD active device (non-self, playing) for a few seconds. Yielding on that
+    // single stale snapshot would yank the user out of the session they just
+    // started. So we (a) suppress the watch for a short window after each local
+    // announce (`watch_suppressed_until`) and (b) require TWO consecutive non-self
+    // "playing" snapshots before yielding (`takeover_streak`).
+    watch_suppressed_until: RwLock<Option<Instant>>,
+    takeover_streak: AtomicU8,
 }
+
+// Grace window after a local announce during which the takeover watch is
+// suppressed (Spotify's `/me/player` is eventually-consistent; a stale snapshot
+// in this window would wrongly show the previous device still active).
+const TAKEOVER_SUPPRESS_WINDOW: Duration = Duration::from_secs(8);
+// Consecutive non-self "playing" snapshots required before we accept a takeover.
+const TAKEOVER_STREAK_TO_YIELD: u8 = 2;
 
 impl ConnectPlayer {
     pub fn new(
@@ -84,6 +101,29 @@ impl ConnectPlayer {
             mirror_published: AtomicBool::new(false),
             takeover_watch_active: AtomicBool::new(false),
             own_device_name: crate::player::connect_device_name(),
+            watch_suppressed_until: RwLock::new(None),
+            takeover_streak: AtomicU8::new(0),
+        }
+    }
+
+    // Begin (or extend) the post-announce grace window during which the takeover
+    // watch is suppressed, and reset the takeover streak. Called whenever riff
+    // (re)asserts itself as the sticky local output — i.e. on the takeover-watch
+    // ON edge — so a stale `/me/player` snapshot right after a local announce
+    // can't trigger a spurious yield.
+    fn suppress_takeover_watch(&self) {
+        if let Ok(mut until) = self.watch_suppressed_until.write() {
+            *until = Some(Instant::now() + TAKEOVER_SUPPRESS_WINDOW);
+        }
+        self.takeover_streak.store(0, Ordering::Relaxed);
+    }
+
+    // Whether the takeover watch is currently within its post-announce grace
+    // window (and should therefore make no yield decision yet).
+    fn takeover_watch_suppressed(&self) -> bool {
+        match self.watch_suppressed_until.read() {
+            Ok(guard) => guard.map(|deadline| Instant::now() < deadline).unwrap_or(false),
+            Err(_) => false,
         }
     }
 
@@ -139,10 +179,14 @@ impl ConnectPlayer {
             self.send_actions([PlaybackAction::LoadSongs(songs).into()]);
         }
 
-        let play_pause = if state.is_playing {
-            PlaybackAction::Load(state.current_song_id.clone().unwrap())
-        } else {
-            PlaybackAction::Pause
+        // `current_song_id` is `None` for podcasts / ads / local files / anything
+        // the controlled device is playing that we can't resolve to a track id.
+        // Only dispatch `Load(id)` when we actually HAVE an id AND it's playing;
+        // otherwise fall back to `Pause` so we never `unwrap()` a `None` and panic
+        // the connect loop (which would kill all Connect functionality).
+        let play_pause = match (&state.current_song_id, state.is_playing) {
+            (Some(id), true) => PlaybackAction::Load(id.clone()),
+            _ => PlaybackAction::Pause,
         };
 
         self.send_actions([
@@ -187,6 +231,16 @@ impl ConnectPlayer {
 
         match self.api.get_player_snapshot().await {
             Ok(Some(snapshot)) => {
+                // The active `/me/player` device may be riff's OWN Spirc device
+                // (riff is the active output). Mirroring that would make riff
+                // "mirror itself" ("Playing on riff (host)") and route taps back to
+                // its own device. Drop it — recognize self the same way
+                // `poll_takeover` does (by Connect name) — and clear any snapshot we
+                // previously published so the UI falls back to local display.
+                if snapshot.device_name == self.own_device_name {
+                    self.clear_mirror_if_published();
+                    return;
+                }
                 let remote: RemotePlayback = snapshot.into();
                 self.mirror_published.store(true, Ordering::Relaxed);
                 self.send_actions([PlaybackAction::SetRemotePlayback(Some(remote)).into()]);
@@ -222,13 +276,30 @@ impl ConnectPlayer {
         if self.has_device() {
             return;
         }
+        // Within the post-announce grace window, `/me/player` may still report the
+        // PREVIOUS device (stale). Make no yield decision yet and keep the streak
+        // reset — one stale snapshot must never yield us out of a session the user
+        // just started.
+        if self.takeover_watch_suppressed() {
+            self.takeover_streak.store(0, Ordering::Relaxed);
+            return;
+        }
         match self.api.get_player_snapshot().await {
             Ok(Some(snapshot)) => {
-                // Only a device that is actively PLAYING counts as a takeover —
-                // a paused snapshot of riff itself (or a stale idle device) must
-                // not yank the user away from their sticky local session.
+                // Only a device that is actively PLAYING and is NOT riff itself
+                // counts toward a takeover — a paused snapshot of riff itself (or a
+                // stale idle device) must not yank the user away from their sticky
+                // local session.
                 let is_self = snapshot.device_name == self.own_device_name;
                 if snapshot.is_playing && !is_self {
+                    // Debounce: `/me/player` is eventually-consistent, so a SINGLE
+                    // non-self playing snapshot may be stale. Require two in a row
+                    // before accepting the takeover.
+                    let streak = self.takeover_streak.fetch_add(1, Ordering::Relaxed) + 1;
+                    if streak < TAKEOVER_STREAK_TO_YIELD {
+                        return;
+                    }
+                    self.takeover_streak.store(0, Ordering::Relaxed);
                     // Publish the snapshot alongside the yield so the mirror has
                     // something to show the instant the flags clear (the yield
                     // handler's refresh_remote_mirror will re-poll too).
@@ -238,11 +309,17 @@ impl ConnectPlayer {
                         PlaybackAction::YieldToRemote.into(),
                         PlaybackAction::SetRemotePlayback(Some(remote)).into(),
                     ]);
+                } else {
+                    // Self / paused snapshot: not a takeover, reset the streak so a
+                    // later single stale non-self snapshot can't accumulate.
+                    self.takeover_streak.store(0, Ordering::Relaxed);
                 }
             }
             // Nothing playing / no active device / a transient error: riff keeps
-            // its sticky local session; the next tick re-checks.
-            Ok(None) => {}
+            // its sticky local session; the next tick re-checks. Reset the streak.
+            Ok(None) => {
+                self.takeover_streak.store(0, Ordering::Relaxed);
+            }
             Err(SpotifyApiError::TooManyRequests) => {
                 debug!("takeover-watch poll rate-limited; backing off");
             }
@@ -397,15 +474,19 @@ impl ConnectPlayer {
             }
             ConnectCommand::SetTakeoverWatchActive(active) => {
                 // Only act on an actual on/off EDGE: `refresh_remote_mirror` re-
-                // sends this on every local play-state transition, and we don't
-                // want to fire an immediate `/me/player` poll on each one.
+                // sends this on every local play-state transition.
                 let was_active = self.takeover_watch_active();
                 self.set_takeover_watch_active(active);
                 if active && !was_active {
-                    // Just turned on: check once right away so a takeover that
-                    // already happened (e.g. between the local play and this
-                    // enable) is caught without waiting a full watch interval.
-                    self.poll_takeover().await;
+                    // The watch turns ON right when riff (re)asserts itself as the
+                    // sticky local output — i.e. just after a local play announce.
+                    // Spotify's `/me/player` is eventually-consistent at that point
+                    // and may still report the PREVIOUS device (non-self, playing),
+                    // so we do NOT poll immediately (that stale snapshot would cause
+                    // a spurious yield). Instead open a short grace window; after it
+                    // the regular low-cadence ticks (with a 2-in-a-row debounce)
+                    // catch a genuine takeover.
+                    self.suppress_takeover_watch();
                 }
                 false
             }
