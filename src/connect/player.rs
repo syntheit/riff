@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::UnboundedSender;
 use gettextrs::gettext;
 
-use crate::api::{SpotifyApiClient, SpotifyApiError, SpotifyResult};
+use crate::api::{RemotePlaybackSnapshot, SpotifyApiClient, SpotifyApiError, SpotifyResult};
 use crate::app::models::{ConnectPlayerState, RemotePlayback, RepeatMode, SongDescription};
 use crate::app::state::{Device, PlaybackAction};
 use crate::app::{AppAction, SongsSource};
@@ -31,6 +31,14 @@ pub enum ConnectCommand {
     PlayerRepeat(RepeatMode),
     PlayerShuffle(bool),
     PlayerSetVolume(u8),
+    PlayerAddToQueue {
+        uri: String,
+    },
+    /// Capture riff's OWN Spirc device id (read from the librespot Session on
+    /// the player thread and threaded here via the app state + notifier) so the
+    /// poll loops can recognize riff itself in `GET /me/player` by id instead of
+    /// by (collision-prone) device name. Sent once after `Spirc::new` succeeds.
+    SetOwnDeviceId(String),
     /// Enable/disable the remote-playback MIRROR poll (controller direction:
     /// showing what's playing on the user's OTHER devices). Toggled by the app
     /// based on visibility + whether riff itself is playing locally, so we only
@@ -64,10 +72,17 @@ pub struct ConnectPlayer {
     // the mirror poll is idle (mirror + takeover-watch are mutually exclusive:
     // the mirror runs when riff is idle, the watch when riff is active).
     takeover_watch_active: AtomicBool,
-    // riff's OWN Connect device name (e.g. "riff (fajita)"), used to recognize
-    // riff itself in `GET /me/player` so "riff is active, just paused" is not
-    // mistaken for another device taking over. Computed once at startup.
+    // riff's OWN Connect device name (e.g. "riff (fajita)"), used as the
+    // FALLBACK self-recognition in `GET /me/player` when the Spirc device id
+    // isn't known yet (before `SetOwnDeviceId` arrives). Computed once at startup.
     own_device_name: String,
+    // riff's OWN Spirc device id (read from the librespot `Session::device_id()`
+    // on the player thread and threaded here via `SetOwnDeviceId`), used to
+    // recognize riff itself in `GET /me/player` so "riff is the active device,
+    // just paused" is NOT mistaken for another device taking over. `None` until
+    // `Spirc::new` has succeeded and the id has been forwarded; falls back to a
+    // name match against `own_device_name` in that window.
+    own_device_id: RwLock<Option<String>>,
     // TAKEOVER-watch debounce state. `/me/player` is EVENTUALLY consistent: right
     // after riff announces a local play through Spirc, a poll may still report the
     // OLD active device (non-self, playing) for a few seconds. Yielding on that
@@ -101,6 +116,7 @@ impl ConnectPlayer {
             mirror_published: AtomicBool::new(false),
             takeover_watch_active: AtomicBool::new(false),
             own_device_name: crate::player::connect_device_name(),
+            own_device_id: RwLock::new(None),
             watch_suppressed_until: RwLock::new(None),
             takeover_streak: AtomicU8::new(0),
         }
@@ -141,6 +157,25 @@ impl ConnectPlayer {
 
     fn set_takeover_watch_active(&self, active: bool) {
         self.takeover_watch_active.store(active, Ordering::Relaxed);
+    }
+
+    // riff's OWN Spirc device id, once `SetOwnDeviceId` has delivered it. Used
+    // to recognize riff itself in `GET /me/player` snapshots by id (robust to
+    // two devices sharing a name). `None` until the player thread forwards the
+    // id; callers fall back to a name match against `own_device_name`.
+    fn own_device_id(&self) -> Option<String> {
+        self.own_device_id.read().ok().and_then(|g| g.clone())
+    }
+
+    // Whether the given snapshot describes riff's OWN Spirc device. Prefers an
+    // id match (exact, collision-free) when `own_device_id` is known, and falls
+    // back to a device-name match otherwise (the window before `SetOwnDeviceId`
+    // arrives — e.g. Spirc disabled or the id not yet forwarded).
+    fn is_own_snapshot(&self, snapshot: &RemotePlaybackSnapshot) -> bool {
+        match self.own_device_id() {
+            Some(id) => snapshot.device_id == id,
+            None => snapshot.device_name == self.own_device_name,
+        }
     }
 
     fn send_actions(&self, actions: impl IntoIterator<Item = AppAction>) {
@@ -235,9 +270,10 @@ impl ConnectPlayer {
                 // (riff is the active output). Mirroring that would make riff
                 // "mirror itself" ("Playing on riff (host)") and route taps back to
                 // its own device. Drop it — recognize self the same way
-                // `poll_takeover` does (by Connect name) — and clear any snapshot we
-                // previously published so the UI falls back to local display.
-                if snapshot.device_name == self.own_device_name {
+                // `poll_takeover` does (by id when known, else by Connect name) —
+                // and clear any snapshot we previously published so the UI falls
+                // back to local display.
+                if self.is_own_snapshot(&snapshot) {
                     self.clear_mirror_if_published();
                     return;
                 }
@@ -290,7 +326,7 @@ impl ConnectPlayer {
                 // counts toward a takeover — a paused snapshot of riff itself (or a
                 // stale idle device) must not yank the user away from their sticky
                 // local session.
-                let is_self = snapshot.device_name == self.own_device_name;
+                let is_self = self.is_own_snapshot(&snapshot);
                 if snapshot.is_playing && !is_self {
                     // Debounce: `/me/player` is eventually-consistent, so a SINGLE
                     // non-self playing snapshot may be stale. Require two in a row
@@ -434,6 +470,9 @@ impl ConnectPlayer {
             ConnectCommand::PlayerSetVolume(volume) => {
                 self.api.player_volume(device_id, volume).await
             }
+            ConnectCommand::PlayerAddToQueue { uri } => {
+                self.api.player_add_to_queue(device_id, uri).await
+            }
             _ => Ok(()),
         }
     }
@@ -452,6 +491,12 @@ impl ConnectPlayer {
                 let device_id = self.device_id.write().ok()?.take();
                 if let Some(old_id) = device_id {
                     let _ = self.api.player_pause(old_id).await;
+                }
+                false
+            }
+            ConnectCommand::SetOwnDeviceId(id) => {
+                if let Ok(mut slot) = self.own_device_id.write() {
+                    *slot = Some(id);
                 }
                 false
             }

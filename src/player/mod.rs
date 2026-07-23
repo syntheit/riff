@@ -169,6 +169,13 @@ impl AppPlayerDelegate {
         self.send(PlaybackAction::SetRemoteControlled(controlled).into())
     }
 
+    /// Forward riff's OWN Spirc device id (read from the librespot `Session` on
+    /// this thread) to the app state so the connect poll loops and the device
+    /// selector can recognize riff itself by id instead of by name.
+    fn set_own_device_id(&self, id: String) {
+        self.send(PlaybackAction::SetOwnDeviceId(id).into())
+    }
+
     /// riff lost active-device status: ANOTHER Connect device took over (Spirc
     /// deactivated riff — `PlayerEvent::Stopped` / `SessionDisconnected` while
     /// riff was the active device). Yield: clear both sticky flags so the

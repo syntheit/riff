@@ -785,6 +785,20 @@ impl SpotifyClient {
             .uri("/v1/me/player/next".to_string(), Some(&query))
     }
 
+    pub(crate) fn player_add_to_queue(
+        &self,
+        device_id: &str,
+        uri: &str,
+    ) -> SpotifyRequest<'_, (), ()> {
+        let query = make_query_params()
+            .append_pair("device_id", device_id)
+            .append_pair("uri", uri)
+            .finish();
+        self.request()
+            .method(Method::POST)
+            .uri("/v1/me/player/queue".to_string(), Some(&query))
+    }
+
     pub(crate) fn player_previous(&self, device_id: &str) -> SpotifyRequest<'_, (), ()> {
         let query = make_query_params()
             .append_pair("device_id", device_id)

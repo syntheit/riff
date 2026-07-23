@@ -324,6 +324,7 @@ mod tests {
         stub_api_method!(player_pause(_device_id: String) -> ());
         stub_api_method!(player_resume(_device_id: String) -> ());
         stub_api_method!(player_next(_device_id: String) -> ());
+        stub_api_method!(player_add_to_queue(_device_id: String, _uri: String) -> ());
         stub_api_method!(player_previous(_device_id: String) -> ());
         stub_api_method!(player_transfer(_device_id: String, _play: bool) -> ());
         stub_api_method!(player_seek(_device_id: String, _pos: usize) -> ());

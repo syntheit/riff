@@ -232,6 +232,14 @@ impl PlayerNotifier {
             PlaybackEvent::ShuffleChanged(shuffled) => {
                 Some(ConnectCommand::PlayerShuffle(shuffled))
             }
+            PlaybackEvent::TracksQueued(uris) => {
+                for uri in uris {
+                    self.send_command_to_connect_player(ConnectCommand::PlayerAddToQueue {
+                        uri,
+                    });
+                }
+                None
+            }
             _ => None,
         };
 
@@ -580,6 +588,12 @@ impl EventListener for PlayerNotifier {
             (_, AppEvent::PlaybackEvent(PlaybackEvent::YieldedActiveDevice)) => {
                 self.send_command_to_local_player(Command::SetLocalOwnsPlayer(false));
                 self.refresh_remote_mirror();
+            }
+            // riff's own Spirc device id arrived from the player thread (after
+            // `Spirc::new` succeeded). Forward it to the connect player so the
+            // poll loops recognize riff itself by id instead of by name.
+            (_, AppEvent::PlaybackEvent(PlaybackEvent::OwnDeviceIdSet(id))) => {
+                self.send_command_to_connect_player(ConnectCommand::SetOwnDeviceId(id));
             }
             // While riff is a Connect RECEIVER, route ALL transport to the Spirc
             // handle (Spirc owns the Player). This branch must precede the
