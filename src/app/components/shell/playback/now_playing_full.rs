@@ -44,13 +44,19 @@ mod imp {
         pub queue_button: TemplateChild<gtk::Button>,
 
         #[template_child]
+        pub title_button: TemplateChild<gtk::Button>,
+
+        #[template_child]
+        pub artist_button: TemplateChild<gtk::Button>,
+
+        #[template_child]
         pub add_to_playlist_button: TemplateChild<gtk::Button>,
 
         #[template_child]
         pub add_to_playlist_icon: TemplateChild<gtk::Image>,
 
         #[template_child]
-        pub close_button: TemplateChild<gtk::Button>,
+        pub menu_button: TemplateChild<gtk::Button>,
 
         #[template_child]
         pub source_button: TemplateChild<gtk::Button>,
@@ -242,8 +248,16 @@ impl NowPlayingFullWidget {
         }
     }
 
-    pub fn connect_close<F: Fn() + 'static>(&self, f: F) {
-        self.imp().close_button.connect_clicked(move |_| f());
+    pub fn connect_show_menu<F: Fn() + 'static>(&self, f: F) {
+        self.imp().menu_button.connect_clicked(move |_| f());
+    }
+
+    pub fn connect_view_album<F: Fn() + 'static>(&self, f: F) {
+        self.imp().title_button.connect_clicked(move |_| f());
+    }
+
+    pub fn connect_view_artist<F: Fn() + 'static>(&self, f: F) {
+        self.imp().artist_button.connect_clicked(move |_| f());
     }
 
     // Wire the tappable "Playing from <source>" header. The callback navigates to

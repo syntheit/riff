@@ -180,6 +180,26 @@ impl NowPlayingSheetModel {
         }
     }
 
+    fn show_song_menu(&self) {
+        if let Some(song) = self.current_song() {
+            self.dispatcher.dispatch(AppAction::ShowSongMenu(song));
+        }
+    }
+
+    fn view_album(&self) {
+        if let Some(song) = self.current_song() {
+            self.dispatcher.dispatch(AppAction::ViewAlbum(song.album.id.clone()));
+        }
+    }
+
+    fn view_artist(&self) {
+        if let Some(song) = self.current_song() {
+            if let Some(artist) = song.artists.first() {
+                self.dispatcher.dispatch(AppAction::ViewArtist(artist.id.clone()));
+            }
+        }
+    }
+
     /// The "PLAYING FROM <TYPE>" / "<name>" pair for the current playback source,
     /// or None when there is no meaningful navigable source (nothing playing, or
     /// an ad-hoc queue with no context). The type label is translated here; the
@@ -324,10 +344,35 @@ impl NowPlayingSheet {
             model,
             move || model.show_add_to_playlist()
         ));
-        widget.connect_close(clone!(
+        widget.connect_show_menu(clone!(
+            #[weak]
+            model,
             #[weak]
             sheet,
-            move || set_sheet_open(&sheet, false)
+            move || {
+                model.show_song_menu();
+                set_sheet_open(&sheet, false);
+            }
+        ));
+        widget.connect_view_album(clone!(
+            #[weak]
+            model,
+            #[weak]
+            sheet,
+            move || {
+                model.view_album();
+                set_sheet_open(&sheet, false);
+            }
+        ));
+        widget.connect_view_artist(clone!(
+            #[weak]
+            model,
+            #[weak]
+            sheet,
+            move || {
+                model.view_artist();
+                set_sheet_open(&sheet, false);
+            }
         ));
         // Tapping "Playing from <source>" navigates to that source and closes the
         // now-playing sheet — exactly like Spotify.
