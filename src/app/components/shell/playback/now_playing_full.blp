@@ -12,9 +12,9 @@ template $NowPlayingFullWidget : Adw.Bin {
       // shows, so the title slot must remain enabled.
       show-title: true;
 
-      Button close_button {
-        icon-name: "go-down-symbolic";
-        tooltip-text: _("Close");
+      Button menu_button {
+        icon-name: "view-more-symbolic";
+        tooltip-text: _("Options");
         focus-on-click: false;
         can-focus: false;
       }
@@ -101,42 +101,68 @@ template $NowPlayingFullWidget : Adw.Bin {
       }
 
       Box {
-        orientation: vertical;
-        spacing: 2;
+        spacing: 12;
 
-        Label title {
-          ellipsize: end;
-          xalign: 0;
-          label: "";
+        Box {
+          orientation: vertical;
+          spacing: 2;
+          hexpand: true;
 
-          styles [
-            "title-1",
-          ]
+          Button title_button {
+            focus-on-click: false;
+            can-focus: false;
+            has-frame: false;
+
+            styles [
+              "flat",
+            ]
+
+            Label title {
+              ellipsize: end;
+              xalign: 0;
+              label: "";
+
+              styles [
+                "title-1",
+              ]
+            }
+          }
+
+          Button artist_button {
+            focus-on-click: false;
+            can-focus: false;
+            has-frame: false;
+
+            styles [
+              "flat",
+            ]
+
+            Label artist {
+              ellipsize: end;
+              xalign: 0;
+              label: "";
+
+              styles [
+                "title-4",
+                "dim-label",
+              ]
+            }
+          }
         }
 
-        Label artist {
-          ellipsize: end;
-          xalign: 0;
-          label: "";
+        Button add_to_playlist_button {
+          halign: end;
+          valign: center;
 
           styles [
-            "title-4",
-            "dim-label",
+            "circular",
+            "add-to-playlist-btn",
           ]
-        }
 
-        // "Playing on <device>" — shown only while a Connect device is active,
-        // hidden when playing locally. Driven from NowPlayingSheet::on_event.
-        Label playing_on_label {
-          ellipsize: end;
-          xalign: 0;
-          label: "";
-          visible: false;
-
-          styles [
-            "caption",
-            "accent",
-          ]
+          Image add_to_playlist_icon {
+            icon-name: "list-add-symbolic";
+            pixel-size: 20;
+          }
         }
       }
 
@@ -187,30 +213,32 @@ template $NowPlayingFullWidget : Adw.Bin {
       }
 
       Box {
-        halign: center;
-        spacing: 16;
+        hexpand: true;
+        spacing: 12;
 
-        Button add_to_playlist_button {
+        Label playing_on_label {
+          ellipsize: end;
+          xalign: 0;
+          hexpand: true;
+          halign: start;
+          label: "";
+          visible: false;
+
           styles [
-            "circular",
-            "add-to-playlist-btn",
+            "caption",
+            "accent",
           ]
-
-          Image add_to_playlist_icon {
-            icon-name: "list-add-symbolic";
-            pixel-size: 20;
-          }
         }
 
         Button queue_button {
+          halign: end;
+          valign: center;
+          focus-on-click: false;
+          icon-name: "music-queue-symbolic";
+
           styles [
             "flat",
           ]
-
-          Adw.ButtonContent {
-            icon-name: "music-queue-symbolic";
-            label: _("Queue");
-          }
         }
       }
     };
