@@ -593,7 +593,7 @@ impl EventListener for PlayerNotifier {
             // `Spirc::new` succeeded). Forward it to the connect player so the
             // poll loops recognize riff itself by id instead of by name.
             (_, AppEvent::PlaybackEvent(PlaybackEvent::OwnDeviceIdSet(id))) => {
-                self.send_command_to_connect_player(ConnectCommand::SetOwnDeviceId(id));
+                self.send_command_to_connect_player(ConnectCommand::SetOwnDeviceId(id.clone()));
             }
             // While riff is a Connect RECEIVER, route ALL transport to the Spirc
             // handle (Spirc owns the Player). This branch must precede the
