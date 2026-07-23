@@ -120,6 +120,15 @@ pub trait SpotifyApiClient {
 
     fn player_previous(&self, device_id: String) -> BoxFuture<SpotifyResult<()>>;
 
+    /// Add a track to the queue of the active playback session on `device_id`
+    /// via `POST /v1/me/player/queue?uri=…&device_id=…`. `uri` is a full Spotify
+    /// URI (`spotify:track:…`), not a bare base62 id.
+    fn player_add_to_queue(
+        &self,
+        device_id: String,
+        uri: String,
+    ) -> BoxFuture<SpotifyResult<()>>;
+
     /// Transfer the active playback session to `device_id`. When `play` is true
     /// playback resumes on the target device, otherwise it is transferred paused.
     fn player_transfer(&self, device_id: String, play: bool) -> BoxFuture<SpotifyResult<()>>;
@@ -902,18 +911,18 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .await?
                 .deserialize()
                 .ok_or(SpotifyApiError::NoContent)?;
-            // riff registers itself as a Connect device (see connect_device_name),
-            // so it shows up in this list too. The device selector already offers a
-            // "This device" (local) entry for the same physical device, so hide
-            // riff's own Spirc device here to avoid listing it twice. Match by name
-            // — the same self-recognition method the takeover watch uses.
-            let own_name = crate::player::connect_device_name();
+            // Return ALL non-restricted devices, including riff's own Spirc
+            // device. The call site (device selector) hides riff's own device by
+            // id (see `PlaybackState::own_device_id`), which is collision-free
+            // where the old name-based filter here was not. Keeping riff's own
+            // device in the raw list lets the poll loops and other consumers
+            // that want self-recognition resolve it without a second API call.
             Ok(devices
                 .devices
                 .into_iter()
                 .filter(|d| {
                     debug!("found device: {:?}", d);
-                    !d.is_restricted && d.name != own_name
+                    !d.is_restricted
                 })
                 .map(ConnectDevice::from)
                 .collect())
@@ -943,6 +952,14 @@ impl SpotifyApiClient for CachedSpotifyClient {
 
     fn player_next(&self, device_id: String) -> BoxFuture<SpotifyResult<()>> {
         Box::pin(self.client.player_next(&device_id).send_no_response())
+    }
+
+    fn player_add_to_queue(
+        &self,
+        device_id: String,
+        uri: String,
+    ) -> BoxFuture<SpotifyResult<()>> {
+        Box::pin(self.client.player_add_to_queue(&device_id, &uri).send_no_response())
     }
 
     fn player_previous(&self, device_id: String) -> BoxFuture<SpotifyResult<()>> {

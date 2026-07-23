@@ -52,6 +52,12 @@ pub struct PlaybackState {
     // the "who owns the Player" switch that keeps riff's queue and Spirc from
     // fighting (see riff-connect.md §4.3, receiver mode).
     is_remote_controlled: bool,
+    // riff's OWN Spirc device id (forwarded from the librespot `Session` on the
+    // player thread once `Spirc::new` succeeds). Used by the connect poll loops
+    // to recognize riff itself in `GET /me/player` by id (collision-free) and by
+    // the device selector to hide riff's own device from its list. `None` until
+    // the player thread delivers it; name-based fallback applies in that window.
+    own_device_id: Option<String>,
 }
 
 // Most mutatings methods shouldn't be pub
@@ -390,6 +396,15 @@ impl PlaybackState {
         self.is_remote_controlled
     }
 
+    /// riff's OWN Spirc device id, once the player thread has forwarded it (set
+    /// from `Session::device_id()` after `Spirc::new` succeeds). Used by the
+    /// device selector to hide riff's own device and — via the connect notifier
+    /// — by the poll loops to recognize riff itself by id. `None` before the id
+    /// arrives (name-based fallback applies in that window).
+    pub fn own_device_id(&self) -> Option<&str> {
+        self.own_device_id.as_deref()
+    }
+
     /// Whether the UI should MIRROR remote playback right now: a remote snapshot
     /// exists, the active device is Local (we haven't switched to control a
     /// Connect device directly), AND riff doesn't own a local session. Gating on
@@ -481,6 +496,7 @@ impl Default for PlaybackState {
             remote_playback: None,
             local_session_active: false,
             is_remote_controlled: false,
+            own_device_id: None,
         }
     }
 }
@@ -534,6 +550,13 @@ pub enum PlaybackAction {
     /// user PAUSE of riff-as-active (which keeps riff sticky), a takeover means
     /// riff is no longer the active output at all.
     YieldToRemote,
+    /// Capture riff's OWN Spirc device id (read from the librespot `Session` on
+    /// the player thread after `Spirc::new` succeeds) so the connect poll loops
+    /// can recognize riff itself in `GET /me/player` by id and the device
+    /// selector can hide riff's own device. Dispatched once per login by the
+    /// player thread; idempotent in the reducer (a later send overwrites the
+    /// earlier value, which is fine across settings-reload re-spawns).
+    SetOwnDeviceId(String),
 }
 
 impl From<PlaybackAction> for AppAction {
@@ -581,6 +604,19 @@ pub enum PlaybackEvent {
     /// mirror and forces an immediate `/me/player` re-poll so the UI switches to
     /// mirroring + controlling the new active device right away.
     YieldedActiveDevice,
+    /// riff's OWN Spirc device id was captured (or updated after a settings
+    /// reload re-spawn). The notifier forwards it to the connect player so the
+    /// poll loops recognize riff itself by id, and the device selector uses it
+    /// to hide riff's own device from its list.
+    OwnDeviceIdSet(String),
+    /// Tracks were added to riff's manual queue (`PlaybackAction::Queue`).
+    /// Carries full `spotify:track:…` URIs. The notifier forwards these to the
+    /// currently-CONTROLLED Connect device via `POST /me/player/queue` so the
+    /// remote device's queue gets them too. Emitted ALONGSIDE
+    /// `PlaylistChanged` (the local queue view still needs to update); in
+    /// local / receiver mode the `TracksQueued` event is a no-op in the
+    /// notifier (riff's own manual_queue already drives playback).
+    TracksQueued(Vec<String>),
 }
 
 impl From<PlaybackEvent> for AppEvent {
@@ -704,8 +740,12 @@ impl UpdatableState for PlaybackState {
                 vec![PlaybackEvent::PlaylistChanged, PlaybackEvent::SourceChanged]
             }
             PlaybackAction::Queue(tracks) => {
+                let uris: Vec<String> = tracks
+                    .iter()
+                    .map(|s| format!("spotify:track:{}", s.id))
+                    .collect();
                 self.queue_next(tracks);
-                vec![PlaybackEvent::PlaylistChanged]
+                vec![PlaybackEvent::PlaylistChanged, PlaybackEvent::TracksQueued(uris)]
             }
             PlaybackAction::Dequeue(id) => {
                 self.dequeue(&[id]);
@@ -808,6 +848,10 @@ impl UpdatableState for PlaybackState {
                 }
                 self.current_device = new_device.clone();
                 vec![PlaybackEvent::SwitchedDevice(new_device)]
+            }
+            PlaybackAction::SetOwnDeviceId(id) => {
+                self.own_device_id = Some(id.clone());
+                vec![PlaybackEvent::OwnDeviceIdSet(id)]
             }
             _ => vec![],
         }

@@ -34,8 +34,33 @@ impl DeviceSelectorModel {
             });
     }
 
-    pub fn get_available_devices(&self) -> impl Deref<Target = Vec<ConnectDevice>> + '_ {
-        self.app_model.map_state(|s| s.playback.available_devices())
+    // The available Connect devices EXCLUDING riff's own Spirc device (so the
+    // list doesn't double-offer the device the user is already on, which has a
+    // separate "This device" / Local entry). `list_available_devices` now
+    // returns ALL non-restricted devices including riff's own; the self-filter
+    // by id lives here at the display call site, which is collision-free where
+    // the old name-based filter in the API layer was not.
+    pub fn get_available_devices(&self) -> Vec<ConnectDevice> {
+        let own_device_id = self
+            .app_model
+            .get_state()
+            .playback
+            .own_device_id()
+            .map(|s| s.to_string());
+        let devices = self
+            .app_model
+            .get_state()
+            .playback
+            .available_devices()
+            .clone();
+        match own_device_id {
+            Some(own_id) => devices
+                .iter()
+                .filter(|d| d.id != own_id)
+                .cloned()
+                .collect(),
+            None => devices.to_vec(),
+        }
     }
 
     pub fn get_current_device(&self) -> impl Deref<Target = Device> + '_ {
@@ -95,6 +120,10 @@ impl EventListener for DeviceSelector {
                 self.model.refresh_available_devices();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
+                self.widget
+                    .update_devices_list(&self.model.get_available_devices());
+            }
+            AppEvent::PlaybackEvent(PlaybackEvent::OwnDeviceIdSet(_)) => {
                 self.widget
                     .update_devices_list(&self.model.get_available_devices());
             }

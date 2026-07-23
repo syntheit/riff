@@ -1093,6 +1093,9 @@ impl SpotifyPlayer {
                 let task = tokio::task::spawn(spirc_task);
                 self.spirc = Some(spirc);
                 self.spirc_task = Some(task);
+                if let Some(session) = self.session.as_ref() {
+                    self.delegate.set_own_device_id(session.device_id().to_string());
+                }
                 true
             }
             Err(_) => false,
