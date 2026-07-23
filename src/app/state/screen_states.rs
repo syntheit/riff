@@ -508,40 +508,22 @@ impl UpdatableState for HomeState {
                     .replace_all(songs.iter().map(song_album_card));
                 self.jump_back_in
                     .replace_all(contexts.iter().map(|c| c.into()));
-                eprintln!(
-                    "RIFF_HOME: reducer stored {} recently_played, {} jump_back_in, emitting RecentlyPlayedUpdated",
-                    self.recently_played.len(),
-                    self.jump_back_in.len()
-                );
                 vec![BrowserEvent::RecentlyPlayedUpdated]
             }
             BrowserAction::SetTopArtists(artists) => {
                 self.top_artists
                     .replace_all(artists.iter().map(|a| a.into()));
-                eprintln!(
-                    "RIFF_HOME: reducer stored {} top_artists, emitting TopArtistsUpdated",
-                    self.top_artists.len()
-                );
                 vec![BrowserEvent::TopArtistsUpdated]
             }
             BrowserAction::SetTopTracks(songs) => {
                 self.top_tracks
                     .replace_all(songs.iter().map(song_album_card));
-                eprintln!(
-                    "RIFF_HOME: reducer stored {} top_tracks, emitting TopTracksUpdated",
-                    self.top_tracks.len()
-                );
                 vec![BrowserEvent::TopTracksUpdated]
             }
             BrowserAction::SetMadeForYou(seed, albums) => {
                 self.made_for_you
                     .replace_all(albums.iter().map(|a| a.into()));
                 self.made_for_you_seed = Some(seed.clone());
-                eprintln!(
-                    "RIFF_HOME: reducer stored {} made_for_you (seed='{}'), emitting MadeForYouUpdated",
-                    self.made_for_you.len(),
-                    seed
-                );
                 vec![BrowserEvent::MadeForYouUpdated]
             }
             _ => vec![],

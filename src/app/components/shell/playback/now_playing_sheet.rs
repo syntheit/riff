@@ -57,24 +57,13 @@ impl NowPlayingSheetModel {
     ) where
         F: std::future::Future<Output = crate::api::SpotifyResult<()>> + Send + 'static,
     {
-        eprintln!(
-            "RIFF_CONNECT: now-playing -> remote control endpoint={endpoint} device={device_id}"
-        );
         if let Some(snapshot) = updated {
             self.dispatcher
                 .dispatch(PlaybackAction::SetRemotePlayback(Some(snapshot)).into());
         }
         self.dispatcher.dispatch_async(Box::pin(async move {
-            match call.await {
-                Ok(()) => eprintln!(
-                    "RIFF_CONNECT: remote control ok endpoint={endpoint} device={device_id}"
-                ),
-                Err(err) => {
-                    eprintln!(
-                        "RIFF_CONNECT: remote control FAILED endpoint={endpoint} device={device_id}: {err}"
-                    );
-                    error!("remote transport failed: {}", err);
-                }
+            if let Err(err) = call.await {
+                error!("remote transport failed: {}", err);
             }
             Some(AppAction::RepollRemoteMirror)
         }));
@@ -228,10 +217,6 @@ impl NowPlayingSheetModel {
 
         // Fall back to the (title-cased-ish) type label when the name is unknown.
         let name = name.unwrap_or_else(|| type_label.clone());
-        // Temporary on-device confirmation of source-header resolution (issue #4).
-        eprintln!(
-            "RIFF_SRC: source_display -> type={type_label:?} name={name:?} source={source:?}"
-        );
         Some((type_label, name))
     }
 
@@ -396,12 +381,10 @@ impl NowPlayingSheet {
     fn update_source(&self) {
         match self.model.source_display() {
             Some((type_label, name)) => {
-                eprintln!("RIFF_SRC: update_source SHOW type={type_label:?} name={name:?}");
                 self.widget
                     .set_source(Some((type_label.as_str(), name.as_str())))
             }
             None => {
-                eprintln!("RIFF_SRC: update_source HIDE (no navigable source)");
                 self.widget.set_source(None)
             }
         }

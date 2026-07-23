@@ -153,7 +153,6 @@ impl AppPlayerDelegate {
 
     /// Enter / leave receiver mode (Spirc took over / released the local Player).
     fn set_remote_controlled(&self, controlled: bool) {
-        eprintln!("RIFF_SPIRC: mirror set_remote_controlled({controlled})");
         self.send(PlaybackAction::SetRemoteControlled(controlled).into())
     }
 
@@ -164,7 +163,6 @@ impl AppPlayerDelegate {
     /// controlling the device that took over. The app side also forces an
     /// immediate `/me/player` re-poll off this.
     fn yield_active_device(&self) {
-        eprintln!("RIFF_SPIRC: deactivated by takeover — yielding active-device status");
         self.send(PlaybackAction::YieldToRemote.into())
     }
 
@@ -173,11 +171,6 @@ impl AppPlayerDelegate {
     /// with no UI changes. Called on librespot `TrackChanged` while receiving.
     #[allow(deprecated)]
     fn mirror_remote_track(&self, song: SongDescription) {
-        eprintln!(
-            "RIFF_SPIRC: mirror track '{}' — {}",
-            song.title,
-            song.artists_name()
-        );
         let id = song.id.clone();
         self.send(PlaybackAction::LoadSongs(vec![song]).into());
         self.send(PlaybackAction::Load(id).into());
@@ -185,7 +178,6 @@ impl AppPlayerDelegate {
 
     /// Mirror the Spirc-driven play/pause state.
     fn mirror_remote_playing(&self, playing: bool) {
-        eprintln!("RIFF_SPIRC: mirror playing={playing}");
         if playing {
             self.send(PlaybackAction::Play.into())
         } else {

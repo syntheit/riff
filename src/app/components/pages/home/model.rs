@@ -44,8 +44,6 @@ impl HomeFeedModel {
     /// user-facing toast). `call_spotify_and_dispatch_many` is used with closures
     /// that map `Err` to `Ok(vec![])` so the notification path is never reached.
     pub fn refresh_feed(&self) {
-        eprintln!("RIFF_HOME: refresh_feed triggered");
-
         // Recently played → track strip + "Jump back in" contexts (one fetch,
         // sliced two ways in the reducer).
         let api = self.app_model.get_spotify();
@@ -53,11 +51,6 @@ impl HomeFeedModel {
             .call_spotify_and_dispatch_many(move || async move {
                 match api.recently_played(RECENTLY_PLAYED_LIMIT).await {
                     Ok((songs, contexts)) => {
-                        eprintln!(
-                            "RIFF_HOME: fetch recently_played -> {} songs, {} contexts",
-                            songs.len(),
-                            contexts.len()
-                        );
                         Ok(vec![
                             BrowserAction::SetRecentlyPlayed(songs, contexts).into()
                         ])
@@ -75,7 +68,6 @@ impl HomeFeedModel {
             .call_spotify_and_dispatch_many(move || async move {
                 match api.get_top_artists(TOP_ARTISTS_LIMIT).await {
                     Ok(artists) => {
-                        eprintln!("RIFF_HOME: fetch top_artists -> {} items", artists.len());
                         Ok(vec![BrowserAction::SetTopArtists(artists).into()])
                     }
                     Err(e) => {
@@ -91,7 +83,6 @@ impl HomeFeedModel {
             .call_spotify_and_dispatch_many(move || async move {
                 match api.get_top_tracks(TOP_TRACKS_LIMIT).await {
                     Ok(songs) => {
-                        eprintln!("RIFF_HOME: fetch top_tracks -> {} items", songs.len());
                         Ok(vec![BrowserAction::SetTopTracks(songs).into()])
                     }
                     Err(e) => {
@@ -107,7 +98,6 @@ impl HomeFeedModel {
             .call_spotify_and_dispatch_many(move || async move {
                 match api.get_saved_albums(0, 20).await {
                     Ok(albums) => {
-                        eprintln!("RIFF_HOME: fetch saved_albums -> {} items", albums.len());
                         Ok(vec![BrowserAction::SetLibraryContent(albums).into()])
                     }
                     Err(e) => {
@@ -153,11 +143,6 @@ impl HomeFeedModel {
                         return Ok(vec![]);
                     }
                 };
-                eprintln!(
-                    "RIFF_HOME: fetch made_for_you (seed='{}') -> {} items",
-                    name,
-                    albums.len()
-                );
                 Ok(vec![BrowserAction::SetMadeForYou(name, albums).into()])
             });
     }

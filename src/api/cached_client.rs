@@ -902,12 +902,18 @@ impl SpotifyApiClient for CachedSpotifyClient {
                 .await?
                 .deserialize()
                 .ok_or(SpotifyApiError::NoContent)?;
+            // riff registers itself as a Connect device (see connect_device_name),
+            // so it shows up in this list too. The device selector already offers a
+            // "This device" (local) entry for the same physical device, so hide
+            // riff's own Spirc device here to avoid listing it twice. Match by name
+            // — the same self-recognition method the takeover watch uses.
+            let own_name = crate::player::connect_device_name();
             Ok(devices
                 .devices
                 .into_iter()
                 .filter(|d| {
                     debug!("found device: {:?}", d);
-                    !d.is_restricted
+                    !d.is_restricted && d.name != own_name
                 })
                 .map(ConnectDevice::from)
                 .collect())

@@ -83,24 +83,13 @@ impl PlaybackModel {
     ) where
         F: std::future::Future<Output = crate::api::SpotifyResult<()>> + Send + 'static,
     {
-        eprintln!(
-            "RIFF_CONNECT: mini-player -> remote control endpoint={endpoint} device={device_id}"
-        );
         if let Some(snapshot) = updated {
             self.dispatcher
                 .dispatch(PlaybackAction::SetRemotePlayback(Some(snapshot)).into());
         }
         self.dispatcher.dispatch_async(Box::pin(async move {
-            match call.await {
-                Ok(()) => eprintln!(
-                    "RIFF_CONNECT: remote control ok endpoint={endpoint} device={device_id}"
-                ),
-                Err(err) => {
-                    eprintln!(
-                        "RIFF_CONNECT: remote control FAILED endpoint={endpoint} device={device_id}: {err}"
-                    );
-                    error!("remote transport failed: {}", err);
-                }
+            if let Err(err) = call.await {
+                error!("remote transport failed: {}", err);
             }
             // Nudge an immediate re-poll so the mirrored snapshot catches up
             // (rather than waiting for the next ~4s poll tick).

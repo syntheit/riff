@@ -187,13 +187,6 @@ impl ConnectPlayer {
 
         match self.api.get_player_snapshot().await {
             Ok(Some(snapshot)) => {
-                eprintln!(
-                    "RIFF_CONNECT: remote-active device={:?} track={:?} playing={} progress={}ms",
-                    snapshot.device_name,
-                    snapshot.song.title,
-                    snapshot.is_playing,
-                    snapshot.progress_ms
-                );
                 let remote: RemotePlayback = snapshot.into();
                 self.mirror_published.store(true, Ordering::Relaxed);
                 self.send_actions([PlaybackAction::SetRemotePlayback(Some(remote)).into()]);
@@ -236,10 +229,6 @@ impl ConnectPlayer {
                 // not yank the user away from their sticky local session.
                 let is_self = snapshot.device_name == self.own_device_name;
                 if snapshot.is_playing && !is_self {
-                    eprintln!(
-                        "RIFF_CONNECT: takeover detected — active device={:?} (not riff '{}') playing track={:?}; yielding",
-                        snapshot.device_name, self.own_device_name, snapshot.song.title
-                    );
                     // Publish the snapshot alongside the yield so the mirror has
                     // something to show the instant the flags clear (the yield
                     // handler's refresh_remote_mirror will re-poll too).
@@ -249,11 +238,6 @@ impl ConnectPlayer {
                         PlaybackAction::YieldToRemote.into(),
                         PlaybackAction::SetRemotePlayback(Some(remote)).into(),
                     ]);
-                } else {
-                    eprintln!(
-                        "RIFF_CONNECT: takeover-watch — active device={:?} playing={} is_self={}; staying local",
-                        snapshot.device_name, snapshot.is_playing, is_self
-                    );
                 }
             }
             // Nothing playing / no active device / a transient error: riff keeps
@@ -273,7 +257,6 @@ impl ConnectPlayer {
     // is disabled — so the UI falls back to local display.
     fn clear_mirror_if_published(&self) {
         if self.mirror_published.swap(false, Ordering::Relaxed) {
-            eprintln!("RIFF_CONNECT: remote-inactive (clearing mirror)");
             self.send_actions([PlaybackAction::SetRemotePlayback(None).into()]);
         }
     }

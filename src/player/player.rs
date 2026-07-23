@@ -486,11 +486,6 @@ impl SpotifyPlayer {
                 // ids via the metadata API.
                 let seed_id_for_hydrate = seed_id.clone();
                 let mut radio_songs = resolve_radio_songs(&session, &seed_id).await;
-                eprintln!(
-                    "RIFF_RADIO: resolved {} radio song(s) for seed {}",
-                    radio_songs.len(),
-                    seed_id
-                );
 
                 // Ensure the seed track leads the station and carries correct
                 // metadata/art (used as the page cover). The apollo response may or
@@ -512,7 +507,6 @@ impl SpotifyPlayer {
                     return Err(SpotifyError::TechnicalError);
                 }
 
-                eprintln!("RIFF_RADIO: station has {} song(s)", songs.len());
                 self.delegate.radio_resolved(seed_id, songs);
                 Ok(())
             }
@@ -804,14 +798,8 @@ impl SpotifyPlayer {
                 .map(|s| !s.username().is_empty())
                 .unwrap_or(false);
             if already_connected {
-                eprintln!(
-                    "RIFF_SPIRC: receiver failed to start but shared session is already connected — local playback OK, receiver absent"
-                );
                 return Ok(());
             }
-            eprintln!(
-                "RIFF_SPIRC: receiver did not start (session unconnected) — connecting shared session directly so local playback works"
-            );
         }
 
         // Spirc disabled (or failed before connecting): connect the shared session
@@ -841,12 +829,9 @@ impl SpotifyPlayer {
     {
         match self.spirc.as_ref() {
             Some(spirc) => {
-                eprintln!("RIFF_SPIRC: handle command {what}");
-                if let Err(e) = f(spirc) {
-                    eprintln!("RIFF_SPIRC: handle command {what} failed: {e}");
-                }
+                let _ = f(spirc);
             }
-            None => eprintln!("RIFF_SPIRC: {what} ignored — no Spirc running"),
+            None => {}
         }
     }
 
@@ -881,21 +866,12 @@ impl SpotifyPlayer {
         // `Some(false)` -> Spirc present but a call errored (fall back).
         let announced = match self.spirc.as_ref() {
             Some(spirc) => {
-                eprintln!(
-                    "RIFF_SPIRC: local play routed THROUGH Spirc ({what}) {}",
-                    describe()
-                );
-                if let Err(e) = spirc.activate() {
-                    eprintln!("RIFF_SPIRC: activate failed ({what}): {e} — falling back to bare Player");
+                if spirc.activate().is_err() {
+                    Some(false)
+                } else if spirc.load(request).is_err() {
                     Some(false)
                 } else {
-                    eprintln!("RIFF_SPIRC: activate ({what})");
-                    if let Err(e) = spirc.load(request) {
-                        eprintln!("RIFF_SPIRC: load failed ({what}): {e} — falling back to bare Player");
-                        Some(false)
-                    } else {
-                        Some(true)
-                    }
+                    Some(true)
                 }
             }
             None => None,
@@ -910,9 +886,6 @@ impl SpotifyPlayer {
                 self.local_owns_player.store(false, Ordering::Relaxed);
             }
             _ => {
-                eprintln!(
-                    "RIFF_SPIRC: FALLBACK to bare Player ({what}) — local audio preserved"
-                );
                 self.spirc_load_fallback(what, fallback, start_playing);
             }
         }
@@ -926,10 +899,9 @@ impl SpotifyPlayer {
         self.local_owns_player.store(true, Ordering::Relaxed);
         match self.get_player_mut() {
             Ok(player) => {
-                eprintln!("RIFF_SPIRC: bare-Player fallback load ({what}) {track}");
                 player.load(track, start_playing, 0);
             }
-            Err(_) => eprintln!("RIFF_SPIRC: fallback load ({what}) skipped — player not ready"),
+            Err(_) => {}
         }
     }
 
@@ -947,7 +919,6 @@ impl SpotifyPlayer {
     /// `creds` are the credentials Spirc uses for the single `session.connect()`.
     async fn spawn_spirc(&mut self, creds: &Credentials) -> bool {
         if !Self::spirc_enabled() {
-            eprintln!("RIFF_SPIRC: receiver disabled via RIFF_SPIRC_DISABLE");
             return false;
         }
 
@@ -964,7 +935,6 @@ impl SpotifyPlayer {
             self.player.clone(),
             self.mixer.clone(),
         ) else {
-            eprintln!("RIFF_SPIRC: cannot spawn — session/player/mixer not ready");
             return false;
         };
         let initial_volume = (self.settings.volume.clamp(0.0, 1.0) * u16::MAX as f64) as u16;
@@ -980,19 +950,14 @@ impl SpotifyPlayer {
             ..Default::default()
         };
 
-        eprintln!("RIFF_SPIRC: spawning Connect receiver as '{device_name}' (connecting shared session)");
         match Spirc::new(config, session, credentials, player, mixer).await {
             Ok((spirc, spirc_task)) => {
                 let task = tokio::task::spawn(spirc_task);
                 self.spirc = Some(spirc);
                 self.spirc_task = Some(task);
-                eprintln!("RIFF_SPIRC: receiver online (shared session connected)");
                 true
             }
-            Err(e) => {
-                eprintln!("RIFF_SPIRC: failed to start receiver: {e}");
-                false
-            }
+            Err(_) => false,
         }
     }
 
@@ -1000,7 +965,6 @@ impl SpotifyPlayer {
     /// other apps' lists. Safe to call when nothing is running.
     fn shutdown_spirc(&mut self) {
         if let Some(spirc) = self.spirc.take() {
-            eprintln!("RIFF_SPIRC: shutting down receiver");
             let _ = spirc.shutdown();
         }
         if let Some(task) = self.spirc_task.take() {
@@ -1215,14 +1179,10 @@ async fn player_setup_delegate(
                 // reach here — that's a `Paused` event (mirrored above), so this is
                 // never a spurious yield on pause.
                 PlayerEvent::Stopped { .. } => {
-                    eprintln!("RIFF_SPIRC: receiver deactivated (Stopped) — takeover/stop, yielding");
                     receiving = false;
                     delegate.yield_active_device();
                 }
                 PlayerEvent::SessionDisconnected { .. } => {
-                    eprintln!(
-                        "RIFF_SPIRC: receiver deactivated (SessionDisconnected) — takeover/stop, yielding"
-                    );
                     receiving = false;
                     delegate.yield_active_device();
                 }
@@ -1339,9 +1299,6 @@ pub fn connect_device_name() -> String {
 ///  4. If the apollo response has no track uris at all but *does* reference a
 ///     playlist/station/album context uri, resolve that context into ids via
 ///     `spclient().get_context(uri)` and hydrate them via `Track::get`.
-///
-/// The raw response head is logged (RIFF_RADIO) so the on-device schema can be
-/// confirmed and this can be tightened later.
 async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescription> {
     let context_uri = format!("spotify:track:{seed_id}");
 
@@ -1353,17 +1310,9 @@ async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescri
             .await
         {
             Ok(bytes) => {
-                let preview: String =
-                    String::from_utf8_lossy(&bytes).chars().take(800).collect();
-                eprintln!(
-                    "RIFF_RADIO: apollo scope={scope} raw head ({} bytes): {preview}",
-                    bytes.len()
-                );
-
                 let value: serde_json::Value = match serde_json::from_slice(&bytes) {
                     Ok(v) => v,
-                    Err(e) => {
-                        eprintln!("RIFF_RADIO: apollo scope={scope} JSON parse failed: {e}");
+                    Err(_) => {
                         continue;
                     }
                 };
@@ -1372,20 +1321,12 @@ async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescri
                 // in the apollo payload (no Track::get).
                 let songs = songs_from_apollo_json(&value);
                 if !songs.is_empty() {
-                    eprintln!(
-                        "RIFF_RADIO: apollo scope={scope} built {} song(s) from JSON metadata",
-                        songs.len()
-                    );
                     return songs;
                 }
 
                 // (b) apollo had track uris but no usable metadata: hydrate ids.
                 let ids = collect_uri_ids(&value, "spotify:track:");
                 if !ids.is_empty() {
-                    eprintln!(
-                        "RIFF_RADIO: apollo scope={scope} yielded {} track uri(s) w/o metadata; hydrating",
-                        ids.len()
-                    );
                     let songs = hydrate_radio_songs(session, &ids).await;
                     if !songs.is_empty() {
                         return songs;
@@ -1396,9 +1337,6 @@ async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescri
                 // resolve that context into ids via the internal resolver, then
                 // hydrate.
                 if let Some(ctx_uri) = first_context_uri(&value) {
-                    eprintln!(
-                        "RIFF_RADIO: apollo scope={scope} returned context uri {ctx_uri}; resolving via get_context"
-                    );
                     let ids = resolve_context_track_ids(session, &ctx_uri).await;
                     if !ids.is_empty() {
                         let songs = hydrate_radio_songs(session, &ids).await;
@@ -1408,13 +1346,10 @@ async fn resolve_radio_songs(session: &Session, seed_id: &str) -> Vec<SongDescri
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("RIFF_RADIO: get_apollo_station scope={scope} failed: {e}");
-            }
+            Err(_) => {}
         }
     }
 
-    eprintln!("RIFF_RADIO: no radio songs resolved for seed {seed_id}");
     Vec::new()
 }
 
@@ -1563,16 +1498,9 @@ async fn resolve_context_track_ids(session: &Session, context_uri: &str) -> Vec<
                     }
                 }
             }
-            eprintln!(
-                "RIFF_RADIO: get_context({context_uri}) yielded {} track id(s)",
-                ids.len()
-            );
             ids
         }
-        Err(e) => {
-            eprintln!("RIFF_RADIO: get_context({context_uri}) failed: {e}");
-            Vec::new()
-        }
+        Err(_) => Vec::new(),
     }
 }
 
@@ -1582,24 +1510,14 @@ async fn resolve_context_track_ids(session: &Session, context_uri: &str) -> Vec<
 async fn hydrate_single_song(session: &Session, id: &str) -> Option<SongDescription> {
     let spotify_id = match SpotifyId::from_base62(id) {
         Ok(v) => v,
-        Err(e) => {
-            eprintln!("RIFF_RADIO: bad track id {id}: {e}");
+        Err(_) => {
             return None;
         }
     };
     let uri = SpotifyUri::Track { id: spotify_id };
     match Track::get(session, &uri).await {
-        Ok(track) => match song_from_track(&track) {
-            Some(song) => Some(song),
-            None => {
-                eprintln!("RIFF_RADIO: could not build SongDescription for {id}");
-                None
-            }
-        },
-        Err(e) => {
-            eprintln!("RIFF_RADIO: metadata fetch failed for {id}: {e}");
-            None
-        }
+        Ok(track) => song_from_track(&track),
+        Err(_) => None,
     }
 }
 

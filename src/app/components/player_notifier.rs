@@ -369,7 +369,6 @@ impl PlayerNotifier {
             _ => None,
         };
         if let Some(command) = command {
-            eprintln!("RIFF_SPIRC: UI transport -> Spirc ({command:?})");
             self.send_command_to_local_player(command);
         }
     }
@@ -415,11 +414,6 @@ impl PlayerNotifier {
             }
         };
 
-        eprintln!(
-            "RIFF_CONNECT: routing play to ACTIVE remote device={device_id} context={context_uri:?} uris={} offset={offset}",
-            uris.as_ref().map(|u| u.len()).unwrap_or(0)
-        );
-
         let api = self.app_model.get_spotify();
         self.dispatcher.dispatch_async(Box::pin(async move {
             if let Err(err) = api
@@ -445,7 +439,6 @@ impl PlayerNotifier {
     // is useful. Once riff plays locally, or the user switches to a Connect device
     // we control directly, the mirror yields.
     fn set_remote_mirror(&self, active: bool) {
-        eprintln!("RIFF_CONNECT: set_remote_mirror({active})");
         self.send_command_to_connect_player(ConnectCommand::SetRemoteMirrorActive(active));
     }
 
@@ -453,7 +446,6 @@ impl PlayerNotifier {
     // local device AND holds a local session — exactly when the mirror is idle —
     // to notice another device taking over (safety net for the Spirc push edge).
     fn set_takeover_watch(&self, active: bool) {
-        eprintln!("RIFF_CONNECT: set_takeover_watch({active})");
         self.send_command_to_connect_player(ConnectCommand::SetTakeoverWatchActive(active));
     }
 
@@ -572,7 +564,6 @@ impl EventListener for PlayerNotifier {
             // advance riff's own queue (local). Also refresh the OTHER-device
             // mirror: it must stay off while receiving.
             (_, AppEvent::PlaybackEvent(PlaybackEvent::RemoteControlChanged(controlled))) => {
-                eprintln!("RIFF_SPIRC: notifier RemoteControlChanged({controlled})");
                 // While receiving, riff (via Spirc) owns local playback, so
                 // local_owns_player = false only when NOT receiving.
                 self.send_command_to_local_player(Command::SetLocalOwnsPlayer(!controlled));
@@ -587,9 +578,6 @@ impl EventListener for PlayerNotifier {
             // the immediate re-poll that switches the UI to the device that took
             // over without waiting for the next ~4s tick.
             (_, AppEvent::PlaybackEvent(PlaybackEvent::YieldedActiveDevice)) => {
-                eprintln!(
-                    "RIFF_CONNECT: notifier YieldedActiveDevice — enabling mirror + immediate re-poll"
-                );
                 self.send_command_to_local_player(Command::SetLocalOwnsPlayer(false));
                 self.refresh_remote_mirror();
             }
@@ -621,9 +609,6 @@ impl EventListener for PlayerNotifier {
             {
                 // active_remote_device() was just checked as Some.
                 let device_id = self.active_remote_device().unwrap();
-                eprintln!(
-                    "RIFF_CONNECT: play routed REMOTE (active output={device_id}); not playing locally"
-                );
                 self.route_play_to_remote(device_id);
             }
             (Device::Local, AppEvent::PlaybackEvent(event)) => {
@@ -631,12 +616,6 @@ impl EventListener for PlayerNotifier {
                 // remote device): play LOCALLY. This is the unchanged local path;
                 // the reducer set `local_session_active` for this play, so riff
                 // becomes/stays the active output and the mirror yields.
-                if matches!(
-                    event,
-                    PlaybackEvent::TrackChanged(_) | PlaybackEvent::SourceChanged
-                ) {
-                    eprintln!("RIFF_CONNECT: play routed LOCAL (riff is the active output)");
-                }
                 // Keep the player thread's "riff owns the Player" flag in sync with
                 // the app-side local session for TRANSPORT-only events (pause /
                 // resume / stop). For a (re)LOAD (TrackChanged / SourceChanged) we
