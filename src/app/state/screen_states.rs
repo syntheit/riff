@@ -141,7 +141,7 @@ impl PlaylistDetailsState {
             id: id.clone(),
             name: ScreenName::PlaylistDetails(id.clone()),
             playlist: None,
-            songs: SongListModel::new(PLAYLIST_TRACKS_BATCH_SIZE),
+            songs: SongListModel::new(PLAYLIST_TRACKS_BATCH_SIZE as u32),
             next_tracks_page: Pagination::new(id, PLAYLIST_TRACKS_BATCH_SIZE),
         }
     }
