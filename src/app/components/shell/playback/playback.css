@@ -151,11 +151,10 @@ viewswitcherbar button:checked {
 }
 
 /* The system gesture area is outside Riff's surface, but its surrounding
-   background follows the window color.  ViewSwitcherBar contains a GtkActionBar
-   that otherwise uses the header-bar surface, making the app's bottom edge read
-   as a separate band.  Keep it on the window surface with the active Adwaita
-   theme token instead of a fixed light or dark color. */
-viewswitcherbar actionbar {
+   background follows the window color.  Keep the ViewSwitcherBar itself on the
+   window surface with the active Adwaita theme token instead of a fixed light
+   or dark color. */
+viewswitcherbar {
   background-color: @window_bg_color;
 }
 
