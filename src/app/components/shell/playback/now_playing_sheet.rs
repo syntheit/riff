@@ -16,6 +16,14 @@ fn set_sheet_open(sheet: &gtk::Widget, open: bool) {
     sheet.set_property("open", open);
 }
 
+/// Header metadata for the current playback context. A mirrored remote track
+/// only carries its album name, not a Spotify context URI, so it must never be
+/// presented as a navigable local source.
+struct SourceDisplay {
+    name: String,
+    navigable: bool,
+}
+
 pub struct NowPlayingSheetModel {
     app_model: Rc<AppModel>,
     dispatcher: Box<dyn ActionDispatcher>,
@@ -199,16 +207,26 @@ impl NowPlayingSheetModel {
         }
     }
 
-    /// The name of the current playback source, or None when there is no
-    /// meaningful navigable source (nothing playing, or an ad-hoc queue with no
-    /// context). Album names come from the current track, while playlist and
-    /// artist names are resolved from their detail state.
-    fn source_display(&self) -> Option<String> {
+    /// Header metadata for the currently displayed playback context. The remote
+    /// snapshot intentionally has no context URI, so while it is mirrored we
+    /// show only its track's album name and disable source navigation. Local
+    /// album names come from the current track; playlist and artist names are
+    /// resolved from the most specific browser state available.
+    fn source_display(&self) -> Option<SourceDisplay> {
         let state = self.state();
-        let source = state.playback.current_source()?;
+        let playback = &state.playback;
+
+        if playback.is_mirroring_remote() {
+            return playback.displayed_song().map(|song| SourceDisplay {
+                name: song.album.name,
+                navigable: false,
+            });
+        }
+
+        let source = playback.current_source()?;
 
         // Only show the header while something is actually playing.
-        let song = state.playback.current_song()?;
+        let song = playback.current_song()?;
 
         let name = source.intrinsic_name().or_else(|| match source {
             SongsSource::Album(_) => Some(song.album.name),
@@ -216,7 +234,15 @@ impl NowPlayingSheetModel {
                 .browser
                 .playlist_details_state(id)
                 .and_then(|s| s.playlist.as_ref())
-                .map(|p| p.title.clone()),
+                .map(|p| p.title.clone())
+                .or_else(|| {
+                    state.browser.home_state().and_then(|home| {
+                        home.playlists
+                            .iter()
+                            .find(|playlist| &playlist.id() == id)
+                            .map(|playlist| playlist.title())
+                    })
+                }),
             SongsSource::Artist(id) => state
                 .browser
                 .artist_state(id)
@@ -224,7 +250,10 @@ impl NowPlayingSheetModel {
             _ => None,
         });
 
-        name
+        name.map(|name| SourceDisplay {
+            name,
+            navigable: true,
+        })
     }
 
     /// Navigate to the current playback source (open its playlist/album/artist/
@@ -234,6 +263,11 @@ impl NowPlayingSheetModel {
     fn navigate_to_source(&self) -> bool {
         let action = {
             let state = self.state();
+            // RemotePlayback has a track but no source context. Never reuse the
+            // local queue's source while a remote track is being mirrored.
+            if state.playback.is_mirroring_remote() {
+                return false;
+            }
             let Some(source) = state.playback.current_source() else {
                 return false;
             };
@@ -400,11 +434,15 @@ impl NowPlayingSheet {
         self.update_source();
     }
 
-    // Reflect the current playback source in the tappable header, hiding it when
-    // there is no navigable source.
+    // Reflect the current playback source in the header, hiding it when there is
+    // no source metadata available.
     fn update_source(&self) {
-        let source_name = self.model.source_display();
-        self.widget.set_source(source_name.as_deref());
+        let source = self.model.source_display();
+        self.widget.set_source(
+            source
+                .as_ref()
+                .map(|source| (source.name.as_str(), source.navigable)),
+        );
     }
 
     // Reflect the active device in the "Playing on <device>" label — the remote
@@ -450,6 +488,15 @@ impl EventListener for NowPlayingSheet {
             }
             AppEvent::BrowserEvent(BrowserEvent::SavedTracksUpdated) => {
                 self.widget.set_liked(self.model.is_current_song_liked());
+            }
+            // A local playlist can have been started from Library or its
+            // long-press menu, where no PlaylistDetailsState was pushed. Refresh
+            // the header when either the saved-library card or detail metadata
+            // arrives so it picks up the actual playlist title.
+            AppEvent::BrowserEvent(BrowserEvent::SavedPlaylistsUpdated)
+            | AppEvent::BrowserEvent(BrowserEvent::PlaylistDetailsLoaded(_))
+            | AppEvent::BrowserEvent(BrowserEvent::ArtistDetailsUpdated(_)) => {
+                self.update_source();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_))
             | AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
