@@ -10,7 +10,7 @@ use crate::app::loader::ImageLoader;
 use crate::app::models::RepeatMode;
 use crate::app::Worker;
 
-use super::playback_controls::PlaybackControlsWidget;
+use super::now_playing_controls::NowPlayingControlsWidget;
 
 mod imp {
 
@@ -38,7 +38,7 @@ mod imp {
         pub duration: TemplateChild<gtk::Label>,
 
         #[template_child]
-        pub controls: TemplateChild<PlaybackControlsWidget>,
+        pub controls: TemplateChild<NowPlayingControlsWidget>,
 
         #[template_child]
         pub queue_button: TemplateChild<gtk::Button>,
@@ -59,10 +59,10 @@ mod imp {
         pub menu_button: TemplateChild<gtk::Button>,
 
         #[template_child]
-        pub source_button: TemplateChild<gtk::Button>,
+        pub close_button: TemplateChild<gtk::Button>,
 
         #[template_child]
-        pub source_type_label: TemplateChild<gtk::Label>,
+        pub source_button: TemplateChild<gtk::Button>,
 
         #[template_child]
         pub source_name_label: TemplateChild<gtk::Label>,
@@ -252,6 +252,10 @@ impl NowPlayingFullWidget {
         self.imp().menu_button.connect_clicked(move |_| f());
     }
 
+    pub fn connect_close<F: Fn() + 'static>(&self, f: F) {
+        self.imp().close_button.connect_clicked(move |_| f());
+    }
+
     pub fn connect_view_album<F: Fn() + 'static>(&self, f: F) {
         self.imp().title_button.connect_clicked(move |_| f());
     }
@@ -260,24 +264,22 @@ impl NowPlayingFullWidget {
         self.imp().artist_button.connect_clicked(move |_| f());
     }
 
-    // Wire the tappable "Playing from <source>" header. The callback navigates to
-    // the current playback source and closes the sheet.
+    // Wire the tappable playback-source name. The callback navigates to the
+    // current source and closes the sheet.
     pub fn connect_source<F: Fn() + 'static>(&self, f: F) {
         self.imp().source_button.connect_clicked(move |_| f());
     }
 
-    // Set (and show) the "PLAYING FROM <TYPE>" / "<name>" source header, or hide
-    // it when there's no navigable source (`info == None`).
-    pub fn set_source(&self, info: Option<(&str, &str)>) {
+    // Set (and show) the source name, or hide it when there is no navigable
+    // source (`name == None`).
+    pub fn set_source(&self, name: Option<&str>) {
         let imp = self.imp();
-        match info {
-            Some((type_label, name)) => {
-                imp.source_type_label.set_text(type_label);
+        match name {
+            Some(name) => {
                 imp.source_name_label.set_text(name);
                 imp.source_button.set_visible(true);
             }
             None => {
-                imp.source_type_label.set_text("");
                 imp.source_name_label.set_text("");
                 imp.source_button.set_visible(false);
             }
