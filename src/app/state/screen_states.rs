@@ -10,6 +10,11 @@ use crate::app::ListStore;
 /// Number of cards (albums, playlists) to load per batch.
 pub const CARD_BATCH_SIZE: usize = 50;
 
+/// Spotify's playlist-items endpoint accepts at most 50 entries per request.
+/// Keep the detail page's visible batch and its pagination in sync with that
+/// API limit so every subsequent page uses a valid offset and limit pair.
+pub const PLAYLIST_TRACKS_BATCH_SIZE: usize = 50;
+
 #[derive(Clone, Debug)]
 pub enum ScreenName {
     Home,
@@ -136,8 +141,8 @@ impl PlaylistDetailsState {
             id: id.clone(),
             name: ScreenName::PlaylistDetails(id.clone()),
             playlist: None,
-            songs: SongListModel::new(100),
-            next_tracks_page: Pagination::new(id, 100),
+            songs: SongListModel::new(PLAYLIST_TRACKS_BATCH_SIZE),
+            next_tracks_page: Pagination::new(id, PLAYLIST_TRACKS_BATCH_SIZE),
         }
     }
 }

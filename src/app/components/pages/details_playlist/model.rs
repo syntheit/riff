@@ -16,6 +16,7 @@ use crate::app::models::*;
 use crate::app::state::SelectionContext;
 use crate::app::state::{
     BrowserAction, BrowserEvent, PlaybackAction, SelectionAction, SelectionState,
+    PLAYLIST_TRACKS_BATCH_SIZE,
 };
 use crate::app::{ActionDispatcher, AppAction, AppEvent, AppModel, PaginationTarget, SongsSource};
 use crate::feature_flags::{self, FeatureFlag};
@@ -104,8 +105,10 @@ impl PageModel for PlaylistDetailsModel {
         let id = self.id.clone();
         self.dispatcher
             .call_spotify_and_dispatch(move || async move {
-                let (tracks_result, playlist_result) =
-                    futures::join!(api.get_playlist_tracks(&id, 0, 100), api.get_playlist(&id));
+                let (tracks_result, playlist_result) = futures::join!(
+                    api.get_playlist_tracks(&id, 0, PLAYLIST_TRACKS_BATCH_SIZE),
+                    api.get_playlist(&id)
+                );
                 let playlist_tracks = tracks_result?;
                 match playlist_result {
                     Ok(playlist) => Ok(BrowserAction::SetPlaylistDetails(
