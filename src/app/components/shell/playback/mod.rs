@@ -1,4 +1,5 @@
 mod component;
+mod now_playing_controls;
 mod now_playing_full;
 mod now_playing_sheet;
 mod playback_controls;
@@ -13,5 +14,6 @@ use glib::prelude::*;
 pub fn expose_widgets() {
     playback_controls::PlaybackControlsWidget::static_type();
     playback_widget::PlaybackWidget::static_type();
+    now_playing_controls::NowPlayingControlsWidget::static_type();
     now_playing_full::NowPlayingFullWidget::static_type();
 }

@@ -1,7 +1,6 @@
 use std::ops::Deref;
 use std::rc::Rc;
 
-use gettextrs::gettext;
 use gtk::prelude::*;
 
 use crate::app::components::EventListener;
@@ -200,29 +199,19 @@ impl NowPlayingSheetModel {
         }
     }
 
-    /// The "PLAYING FROM <TYPE>" / "<name>" pair for the current playback source,
-    /// or None when there is no meaningful navigable source (nothing playing, or
-    /// an ad-hoc queue with no context). The type label is translated here; the
-    /// name is the source's own name where it carries one (Liked Songs, Radio),
-    /// otherwise resolved from the matching detail screen in browser state, with
-    /// the type label as a final fallback.
-    fn source_display(&self) -> Option<(String, String)> {
+    /// The name of the current playback source, or None when there is no
+    /// meaningful navigable source (nothing playing, or an ad-hoc queue with no
+    /// context). Album names come from the current track, while playlist and
+    /// artist names are resolved from their detail state.
+    fn source_display(&self) -> Option<String> {
         let state = self.state();
         let source = state.playback.current_source()?;
 
         // Only show the header while something is actually playing.
-        if state.playback.current_song().is_none() {
-            return None;
-        }
-
-        let type_label = translate_source_type(source);
+        let song = state.playback.current_song()?;
 
         let name = source.intrinsic_name().or_else(|| match source {
-            SongsSource::Album(id) => state
-                .browser
-                .details_state(id)
-                .and_then(|s| s.content.as_ref())
-                .map(|c| c.description.title.clone()),
+            SongsSource::Album(_) => Some(song.album.name),
             SongsSource::Playlist(id) => state
                 .browser
                 .playlist_details_state(id)
@@ -235,9 +224,7 @@ impl NowPlayingSheetModel {
             _ => None,
         });
 
-        // Fall back to the (title-cased-ish) type label when the name is unknown.
-        let name = name.unwrap_or_else(|| type_label.clone());
-        Some((type_label, name))
+        name
     }
 
     /// Navigate to the current playback source (open its playlist/album/artist/
@@ -268,18 +255,6 @@ impl NowPlayingSheetModel {
         };
         self.dispatcher.dispatch(action);
         true
-    }
-}
-
-/// Translate the source's stable English type key for the "PLAYING FROM <TYPE>"
-/// caption.
-fn translate_source_type(source: &SongsSource) -> String {
-    match source {
-        SongsSource::Playlist(_) => gettext("PLAYLIST"),
-        SongsSource::Album(_) => gettext("ALBUM"),
-        SongsSource::Artist(_) => gettext("ARTIST"),
-        SongsSource::SavedTracks => gettext("LIKED SONGS"),
-        SongsSource::Radio { .. } => gettext("RADIO"),
     }
 }
 
@@ -354,6 +329,11 @@ impl NowPlayingSheet {
                 set_sheet_open(&sheet, false);
             }
         ));
+        widget.connect_close(clone!(
+            #[weak]
+            sheet,
+            move || set_sheet_open(&sheet, false)
+        ));
         widget.connect_view_album(clone!(
             #[weak]
             model,
@@ -374,8 +354,7 @@ impl NowPlayingSheet {
                 set_sheet_open(&sheet, false);
             }
         ));
-        // Tapping "Playing from <source>" navigates to that source and closes the
-        // now-playing sheet — exactly like Spotify.
+        // Tapping the playback source navigates to it and closes the sheet.
         widget.connect_source(clone!(
             #[weak]
             model,
@@ -421,18 +400,11 @@ impl NowPlayingSheet {
         self.update_source();
     }
 
-    // Reflect the current playback source in the tappable "Playing from" header,
-    // hiding it when there's no navigable source.
+    // Reflect the current playback source in the tappable header, hiding it when
+    // there is no navigable source.
     fn update_source(&self) {
-        match self.model.source_display() {
-            Some((type_label, name)) => {
-                self.widget
-                    .set_source(Some((type_label.as_str(), name.as_str())))
-            }
-            None => {
-                self.widget.set_source(None)
-            }
-        }
+        let source_name = self.model.source_display();
+        self.widget.set_source(source_name.as_deref());
     }
 
     // Reflect the active device in the "Playing on <device>" label — the remote

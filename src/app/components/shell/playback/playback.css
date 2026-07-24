@@ -38,6 +38,35 @@
   min-height: 40px;
 }
 
+.now-playing-transport-button {
+  min-width: 56px;
+  min-height: 56px;
+}
+
+.now-playing-playback-button {
+  min-width: 64px;
+  min-height: 64px;
+}
+
+.now-playing-mode-button {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+.now-playing-transport-button image,
+.now-playing-playback-button image {
+  -gtk-icon-size: 28px;
+}
+
+.now-playing-mode-button image {
+  -gtk-icon-size: 20px;
+}
+
+.now-playing-metadata-button {
+  min-height: 0;
+  padding: 0;
+}
+
 .playing-image {
   border-radius: 6px;
   margin: -4px 0 -4px -8px;

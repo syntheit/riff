@@ -42,6 +42,7 @@
     <!-- playback -->
     <file alias="components/playback.css">app/components/shell/playback/playback.css</file>
     <file alias="components/playback_controls.ui">app/components/shell/playback/playback_controls.ui</file>
+    <file alias="components/now_playing_controls.ui">app/components/shell/playback/now_playing_controls.ui</file>
     <file alias="components/playback_info.ui">app/components/shell/playback/playback_info.ui</file>
     <file alias="components/playback_widget.ui">app/components/shell/playback/playback_widget.ui</file>
     <file alias="components/now_playing_full.ui">app/components/shell/playback/now_playing_full.ui</file>

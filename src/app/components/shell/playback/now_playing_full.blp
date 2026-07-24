@@ -5,23 +5,19 @@ template $NowPlayingFullWidget : Adw.Bin {
   Adw.ToolbarView {
     [top]
     Adw.HeaderBar {
-      // NOTE: do NOT set `show-title: false` here — Adw.HeaderBar hides its
-      // custom [title] widget when show-title is false, which suppressed the
-      // "PLAYING FROM <source>" header entirely. The header's own
-      // `source_button.visible` (driven from NowPlayingSheet) controls when it
-      // shows, so the title slot must remain enabled.
       show-title: true;
 
-      Button menu_button {
-        icon-name: "view-more-symbolic";
-        tooltip-text: _("Options");
+      [start]
+      Button close_button {
+        icon-name: "pan-down-symbolic";
+        tooltip-text: _("Close player");
         focus-on-click: false;
         can-focus: false;
       }
 
-      // "PLAYING FROM <TYPE>" / "<name>" — the tappable source header (mirrors
-      // Spotify). Hidden until there's a navigable source; tapping navigates to
-      // that source and closes the sheet. Driven from NowPlayingSheet::on_event.
+      // The tappable playback-source name. It is hidden when there is no
+      // navigable source and, unlike the previous two-line treatment, never
+      // repeats a generic type such as "ALBUM" above the actual name.
       [title]
       Button source_button {
         visible: false;
@@ -32,39 +28,35 @@ template $NowPlayingFullWidget : Adw.Bin {
           "flat",
         ]
 
-        Box {
-          orientation: vertical;
-          valign: center;
-          halign: center;
+        Label source_name_label {
+          ellipsize: end;
+          xalign: 0.5;
+          label: "";
 
-          Label source_type_label {
-            ellipsize: end;
-            xalign: 0.5;
-            label: "";
-
-            styles [
-              "caption-heading",
-              "dim-label",
-            ]
-          }
-
-          Label source_name_label {
-            ellipsize: end;
-            xalign: 0.5;
-            label: "";
-
-            styles [
-              "heading",
-            ]
-          }
+          styles [
+            "heading",
+          ]
         }
       }
 
-      // Hidden by default; shown + wired only when FeatureFlag::DeviceSelector
-      // is enabled (see App::make_device_selector).
+      // Keep the overflow menu in the upper-right corner. The optional device
+      // selector sits immediately to its left when that feature is enabled.
       [end]
-      $DeviceSelectorWidget device_selector {
-        visible: false;
+      Box {
+        spacing: 4;
+
+        // Hidden by default; shown + wired only when FeatureFlag::DeviceSelector
+        // is enabled (see App::make_device_selector).
+        $DeviceSelectorWidget device_selector {
+          visible: false;
+        }
+
+        Button menu_button {
+          icon-name: "view-more-symbolic";
+          tooltip-text: _("Options");
+          focus-on-click: false;
+          can-focus: false;
+        }
       }
     }
 
@@ -105,7 +97,7 @@ template $NowPlayingFullWidget : Adw.Bin {
 
         Box {
           orientation: vertical;
-          spacing: 2;
+          spacing: 0;
           hexpand: true;
 
           Button title_button {
@@ -115,6 +107,7 @@ template $NowPlayingFullWidget : Adw.Bin {
 
             styles [
               "flat",
+              "now-playing-metadata-button",
             ]
 
             Label title {
@@ -123,7 +116,7 @@ template $NowPlayingFullWidget : Adw.Bin {
               label: "";
 
               styles [
-                "title-1",
+                "title-2",
               ]
             }
           }
@@ -135,6 +128,7 @@ template $NowPlayingFullWidget : Adw.Bin {
 
             styles [
               "flat",
+              "now-playing-metadata-button",
             ]
 
             Label artist {
@@ -143,7 +137,7 @@ template $NowPlayingFullWidget : Adw.Bin {
               label: "";
 
               styles [
-                "title-4",
+                "body",
                 "dim-label",
               ]
             }
@@ -208,8 +202,8 @@ template $NowPlayingFullWidget : Adw.Bin {
         }
       }
 
-      $PlaybackControlsWidget controls {
-        halign: center;
+      $NowPlayingControlsWidget controls {
+        hexpand: true;
       }
 
       Box {
