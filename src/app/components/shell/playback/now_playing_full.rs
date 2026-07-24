@@ -270,17 +270,20 @@ impl NowPlayingFullWidget {
         self.imp().source_button.connect_clicked(move |_| f());
     }
 
-    // Set (and show) the source name, or hide it when there is no navigable
-    // source (`name == None`).
-    pub fn set_source(&self, name: Option<&str>) {
+    // Set (and show) the source name, or hide it when there is no source. Remote
+    // snapshots do not contain a navigable Spotify context, so their album-name
+    // fallback is rendered as a disabled header rather than a stale local link.
+    pub fn set_source(&self, info: Option<(&str, bool)>) {
         let imp = self.imp();
-        match name {
-            Some(name) => {
+        match info {
+            Some((name, navigable)) => {
                 imp.source_name_label.set_text(name);
+                imp.source_button.set_sensitive(navigable);
                 imp.source_button.set_visible(true);
             }
             None => {
                 imp.source_name_label.set_text("");
+                imp.source_button.set_sensitive(false);
                 imp.source_button.set_visible(false);
             }
         }
