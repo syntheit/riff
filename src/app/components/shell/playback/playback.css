@@ -121,6 +121,15 @@ viewswitcherbar button:checked {
   box-shadow: none;
 }
 
+/* The system gesture area is outside Riff's surface, but its surrounding
+   background follows the window color.  ViewSwitcherBar contains a GtkActionBar
+   that otherwise uses the header-bar surface, making the app's bottom edge read
+   as a separate band.  Keep it on the window surface with the active Adwaita
+   theme token instead of a fixed light or dark color. */
+viewswitcherbar actionbar {
+  background-color: @window_bg_color;
+}
+
 /* Now-Playing sheet: fullscreen-page look. The .now-playing-sheet CSS class is
    set on the AdwBottomSheet in window.blp. Target its `sheet` subnode to flatten
    the rounded top corners and remove the drop-shadow/border that makes it read as
