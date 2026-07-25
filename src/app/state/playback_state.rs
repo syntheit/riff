@@ -374,6 +374,20 @@ impl PlaybackState {
         &self.current_device
     }
 
+    /// The device represented by the currently displayed playback. While riff
+    /// mirrors another Spotify Connect player, the footer selector must name that
+    /// remote device instead of the local controller that happens to own the UI.
+    pub fn displayed_device(&self) -> Device {
+        if self.is_mirroring_remote() {
+            return self
+                .remote_playback
+                .as_ref()
+                .map(|remote| Device::Connect(remote.device.clone()))
+                .unwrap_or_else(|| self.current_device.clone());
+        }
+        self.current_device.clone()
+    }
+
     /// The remote-playback snapshot (what's playing on another device), if any.
     pub fn remote_playback(&self) -> Option<&RemotePlayback> {
         self.remote_playback.as_ref()
@@ -986,6 +1000,10 @@ mod tests {
             Some("remote-song".to_string())
         );
         assert_eq!(state.displayed_device_name(), Some("Desktop".to_string()));
+        assert!(matches!(
+            state.displayed_device(),
+            Device::Connect(device) if device.id == "dev1" && device.label == "Desktop"
+        ));
     }
 
     #[test]
@@ -1681,7 +1699,10 @@ mod tests {
 
         // Step 2: LoadPagedSongs
         state.update_with(Cow::Owned(PlaybackAction::LoadPagedSongs(
-            SongsSource::Playlist("pl1".to_string()),
+            SongsSource::Playlist {
+                id: "pl1".to_string(),
+                title: "Playlist 1".to_string(),
+            },
             batch,
         )));
         // songs.len() returns total=200, but only 100 are actually loaded

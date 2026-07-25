@@ -70,9 +70,6 @@ mod imp {
         #[template_child]
         pub device_selector: TemplateChild<DeviceSelectorWidget>,
 
-        #[template_child]
-        pub playing_on_label: TemplateChild<gtk::Label>,
-
         pub clock: Clock,
     }
 
@@ -289,28 +286,9 @@ impl NowPlayingFullWidget {
         }
     }
 
-    // The embedded Spotify Connect device selector, instantiated as part of this
-    // widget's template. Returned so the DeviceSelector component can drive it.
+    // The Spotify Connect device selector in the player footer. Returned so the
+    // DeviceSelector component can drive its existing picker/popover.
     pub fn device_selector(&self) -> DeviceSelectorWidget {
         self.imp().device_selector.get()
-    }
-
-    // Show "Playing on <device>" while a Connect device is active; hide it when
-    // playing locally (`name == None`).
-    pub fn set_playing_on(&self, name: Option<&str>) {
-        let imp = self.imp();
-        match name {
-            Some(name) => {
-                // translators: shown in the now-playing view when playback is on
-                // a remote Spotify Connect device; {} is the device name.
-                imp.playing_on_label
-                    .set_text(&gettext!("Playing on {}", name));
-                imp.playing_on_label.set_visible(true);
-            }
-            None => {
-                imp.playing_on_label.set_text("");
-                imp.playing_on_label.set_visible(false);
-            }
-        }
     }
 }

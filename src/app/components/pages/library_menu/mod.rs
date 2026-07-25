@@ -112,7 +112,10 @@ impl LibraryMenuModel {
                     match api.get_playlist(&id).await {
                         Ok(playlist) => {
                             let batch = playlist.songs.clone();
-                            let source = SongsSource::Playlist(id.clone());
+                            let source = SongsSource::Playlist {
+                                id: playlist.id.clone(),
+                                title: playlist.title.clone(),
+                            };
                             match batch.songs.first().map(|s| s.id.clone()) {
                                 Some(first) => vec![
                                     PlaybackAction::LoadPagedSongs(source, batch).into(),

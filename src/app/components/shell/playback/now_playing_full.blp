@@ -15,9 +15,9 @@ template $NowPlayingFullWidget : Adw.Bin {
         can-focus: false;
       }
 
-      // The tappable playback-source name. It is hidden when there is no
-      // navigable source and, unlike the previous two-line treatment, never
-      // repeats a generic type such as "ALBUM" above the actual name.
+      // The playback-source name. It is hidden only when no actual source name
+      // is available and never repeats a generic type such as "ALBUM" above the
+      // actual name. Remote-mirrored album names are intentionally not links.
       [title]
       Button source_button {
         visible: false;
@@ -39,24 +39,15 @@ template $NowPlayingFullWidget : Adw.Bin {
         }
       }
 
-      // Keep the overflow menu in the upper-right corner. The optional device
-      // selector sits immediately to its left when that feature is enabled.
+      // Keep the overflow menu in the upper-right corner. Device selection
+      // belongs in the player footer, so this header has one explicit close
+      // control on the left and one options control on the right.
       [end]
-      Box {
-        spacing: 4;
-
-        // Hidden by default; shown + wired only when FeatureFlag::DeviceSelector
-        // is enabled (see App::make_device_selector).
-        $DeviceSelectorWidget device_selector {
-          visible: false;
-        }
-
-        Button menu_button {
-          icon-name: "view-more-symbolic";
-          tooltip-text: _("Options");
-          focus-on-click: false;
-          can-focus: false;
-        }
+      Button menu_button {
+        icon-name: "view-more-symbolic";
+        tooltip-text: _("Options");
+        focus-on-click: false;
+        can-focus: false;
       }
     }
 
@@ -210,17 +201,18 @@ template $NowPlayingFullWidget : Adw.Bin {
         hexpand: true;
         spacing: 12;
 
-        Label playing_on_label {
-          ellipsize: end;
-          xalign: 0;
+        // Hidden by default; enabled by App::make_device_selector. Its visible
+        // device text is the sole entry point to the existing picker/popover.
+        $DeviceSelectorWidget device_selector {
+          visible: false;
           hexpand: true;
           halign: start;
-          label: "";
-          visible: false;
+          focus-on-click: false;
+          can-focus: false;
 
           styles [
-            "caption",
-            "accent",
+            "flat",
+            "now-playing-device-button",
           ]
         }
 

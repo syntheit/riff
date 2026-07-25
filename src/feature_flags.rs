@@ -81,7 +81,7 @@ impl FeatureFlag {
             }
             FeatureFlag::CreateNewPlaylist => "Enable the New Playlist button in the sidebar.",
             FeatureFlag::DeviceSelector => {
-                "Enable the device selector in the Now Playing headerbar."
+                "Enable the device selector in the Now Playing footer."
             }
             FeatureFlag::Normalisation => {
                 "Show audio normalisation settings for fine-tuning loudness between tracks."

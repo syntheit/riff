@@ -166,7 +166,7 @@ impl PageModel for PlaylistDetailsModel {
     }
 
     fn source_is_playing(&self) -> bool {
-        matches!(self.app_model.get_state().playback.current_source(), Some(SongsSource::Playlist(ref id)) if id == &self.id)
+        matches!(self.app_model.get_state().playback.current_source(), Some(SongsSource::Playlist { id, .. }) if id == &self.id)
     }
 
     impl_toggle_play!();
@@ -251,12 +251,20 @@ impl PlaylistModel for PlaylistDetailsModel {
     }
 
     fn play_song_at(&self, pos: usize, id: &str) {
+        // Keep the source title with playback. The now-playing sheet must not
+        // depend on this optional detail page remaining in browser state.
+        let Some(source) = self.get_playlist_info().map(|playlist| {
+            SongsSource::Playlist {
+                id: self.id.clone(),
+                title: playlist.title.clone(),
+            }
+        }) else {
+            return;
+        };
         let batch = PlaylistModel::song_list_model(self).song_batch_for(pos);
         if let Some(batch) = batch {
-            self.dispatcher.dispatch(
-                PlaybackAction::LoadPagedSongs(SongsSource::Playlist(self.id.clone()), batch)
-                    .into(),
-            );
+            self.dispatcher
+                .dispatch(PlaybackAction::LoadPagedSongs(source, batch).into());
             self.dispatcher
                 .dispatch(PlaybackAction::Load(id.to_string()).into());
         }

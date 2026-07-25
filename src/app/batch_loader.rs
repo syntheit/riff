@@ -14,7 +14,10 @@ pub struct BatchLoader {
 // The sources mentionned above
 #[derive(Clone, Debug)]
 pub enum SongsSource {
-    Playlist(String),
+    // Playlist names must travel with the playback source. A playlist can be
+    // started from Library's long-press menu without a details page in browser
+    // state, but the now-playing header must still show its actual title.
+    Playlist { id: String, title: String },
     Album(String),
     Artist(String),
     SavedTracks,
@@ -28,7 +31,7 @@ pub enum SongsSource {
 impl PartialEq for SongsSource {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Playlist(l), Self::Playlist(r)) => l == r,
+            (Self::Playlist { id: l, .. }, Self::Playlist { id: r, .. }) => l == r,
             (Self::Album(l), Self::Album(r)) => l == r,
             (Self::Artist(l), Self::Artist(r)) => l == r,
             (Self::SavedTracks, Self::SavedTracks) => true,
@@ -47,21 +50,20 @@ impl Eq for SongsSource {}
 
 impl SongsSource {
     pub fn has_spotify_uri(&self) -> bool {
-        matches!(self, Self::Playlist(_) | Self::Album(_))
+        matches!(self, Self::Playlist { .. } | Self::Album(_))
     }
 
     pub fn spotify_uri(&self) -> Option<String> {
         match self {
-            Self::Playlist(id) => Some(format!("spotify:playlist:{}", id)),
+            Self::Playlist { id, .. } => Some(format!("spotify:playlist:{}", id)),
             Self::Album(id) => Some(format!("spotify:album:{}", id)),
             _ => None,
         }
     }
 
-    /// A human display name for the source, when the source itself carries one
-    /// (Liked Songs, Radio). Playlist/album/artist names are not stored on the
-    /// source (only ids), so those return None and the caller resolves the name
-    /// from browser state (falling back to the type label).
+    /// A human display name for a source that carries one. Playlists retain their
+    /// actual title; Liked Songs and Radio use their intrinsic names. Album and
+    /// artist names come from the currently playing track.
     pub fn intrinsic_name(&self) -> Option<String> {
         match self {
             Self::SavedTracks => Some("Liked Songs".to_string()),
@@ -106,7 +108,7 @@ impl BatchLoader {
         }
 
         let do_fetch = || match &query.source {
-            SongsSource::Playlist(id) => api.get_playlist_tracks(id, offset, batch_size),
+            SongsSource::Playlist { id, .. } => api.get_playlist_tracks(id, offset, batch_size),
             SongsSource::SavedTracks => api.get_saved_tracks(offset, batch_size),
             SongsSource::Album(id) => api.get_album_tracks(id, offset, batch_size),
             SongsSource::Artist(_) | SongsSource::Radio { .. } => unreachable!(),

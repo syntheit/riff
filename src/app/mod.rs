@@ -158,7 +158,7 @@ impl App {
             App::make_notification(builder),
         ];
 
-        // The Spotify Connect device selector lives in the now-playing header.
+        // The Spotify Connect device selector lives in the now-playing footer.
         // It is gated behind FeatureFlag::DeviceSelector so it can ship dark; the
         // embedded widget is always instantiated (part of the now_playing_full
         // template) but only wired to the reducer + shown when the flag is on.
@@ -178,8 +178,8 @@ impl App {
         app_model: Rc<AppModel>,
         dispatcher: Box<dyn ActionDispatcher>,
     ) -> Box<impl EventListener> {
-        // The selector widget is instantiated as a child of the now-playing full
-        // view template; pull that same instance out and drive it.
+        // The selector widget is instantiated in the now-playing footer; pull
+        // that same instance out and drive its picker/popover.
         let now_playing_full: NowPlayingFullWidget = builder.object("now_playing_full").unwrap();
         let widget = now_playing_full.device_selector();
         widget.set_visible(true);

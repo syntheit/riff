@@ -214,7 +214,7 @@
     </key>
     <key name="feature-device-selector" type="b">
       <default>false</default>
-      <summary>Enable the device selector in the Now Playing headerbar</summary>
+      <summary>Enable the device selector in the Now Playing footer</summary>
     </key>
     <key name="feature-debug-css" type="b">
       <default>false</default>

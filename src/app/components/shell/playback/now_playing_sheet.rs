@@ -163,12 +163,6 @@ impl NowPlayingSheetModel {
         self.state().playback.displayed_song()
     }
 
-    // Name of the device to show in "Playing on X": the mirrored remote device
-    // (controller direction) or the switched-to Connect device; None when local.
-    fn current_device_name(&self) -> Option<String> {
-        self.state().playback.displayed_device_name()
-    }
-
     fn is_current_song_liked(&self) -> bool {
         let state = self.state();
         let Some(song) = state.playback.current_song() else {
@@ -209,9 +203,9 @@ impl NowPlayingSheetModel {
 
     /// Header metadata for the currently displayed playback context. The remote
     /// snapshot intentionally has no context URI, so while it is mirrored we
-    /// show only its track's album name and disable source navigation. Local
-    /// album names come from the current track; playlist and artist names are
-    /// resolved from the most specific browser state available.
+    /// show only its track's album name and disable source navigation. A local
+    /// playlist carries its name in `SongsSource` when playback starts, rather
+    /// than depending on an optional browser detail page that may not be open.
     fn source_display(&self) -> Option<SourceDisplay> {
         let state = self.state();
         let playback = &state.playback;
@@ -223,34 +217,25 @@ impl NowPlayingSheetModel {
             });
         }
 
-        let source = playback.current_source()?;
-
-        // Only show the header while something is actually playing.
         let song = playback.current_song()?;
 
-        let name = source.intrinsic_name().or_else(|| match source {
-            SongsSource::Album(_) => Some(song.album.name),
-            SongsSource::Playlist(id) => state
-                .browser
-                .playlist_details_state(id)
-                .and_then(|s| s.playlist.as_ref())
-                .map(|p| p.title.clone())
-                .or_else(|| {
-                    state.browser.home_state().and_then(|home| {
-                        home.playlists
-                            .iter()
-                            .find(|playlist| &playlist.id() == id)
-                            .map(|playlist| playlist.title())
-                    })
-                }),
-            SongsSource::Artist(id) => state
-                .browser
-                .artist_state(id)
-                .and_then(|s| s.artist.clone()),
-            _ => None,
-        });
+        let Some(source) = playback.current_source() else {
+            return (!song.album.name.is_empty()).then(|| SourceDisplay {
+                name: song.album.name,
+                navigable: false,
+            });
+        };
 
-        name.map(|name| SourceDisplay {
+        let name = match source {
+            SongsSource::Playlist { title, .. } => title.clone(),
+            SongsSource::Album(_) => song.album.name,
+            SongsSource::Artist(_) => song.artists_name(),
+            SongsSource::SavedTracks | SongsSource::Radio { .. } => source
+                .intrinsic_name()
+                .expect("intrinsic playback sources always have a display name"),
+        };
+
+        (!name.is_empty()).then(|| SourceDisplay {
             name,
             navigable: true,
         })
@@ -273,7 +258,7 @@ impl NowPlayingSheetModel {
             };
             match source {
                 SongsSource::Album(id) => AppAction::ViewAlbum(id.clone()),
-                SongsSource::Playlist(id) => AppAction::ViewPlaylist(id.clone()),
+                SongsSource::Playlist { id, .. } => AppAction::ViewPlaylist(id.clone()),
                 SongsSource::Artist(id) => AppAction::ViewArtist(id.clone()),
                 SongsSource::SavedTracks => {
                     BrowserAction::NavigationPush(ScreenName::SavedTracks).into()
@@ -356,11 +341,8 @@ impl NowPlayingSheet {
         widget.connect_show_menu(clone!(
             #[weak]
             model,
-            #[weak]
-            sheet,
             move || {
                 model.show_song_menu();
-                set_sheet_open(&sheet, false);
             }
         ));
         widget.connect_close(clone!(
@@ -430,7 +412,6 @@ impl NowPlayingSheet {
         self.widget.set_repeat_mode(self.model.repeat_mode());
         self.update_current_info();
         self.widget.set_seek_position(self.last_position as f64);
-        self.update_playing_on();
         self.update_source();
     }
 
@@ -445,12 +426,6 @@ impl NowPlayingSheet {
         );
     }
 
-    // Reflect the active device in the "Playing on <device>" label — the remote
-    // device name when a Connect device is active, hidden when playing locally.
-    fn update_playing_on(&self) {
-        self.widget
-            .set_playing_on(self.model.current_device_name().as_deref());
-    }
 }
 
 impl EventListener for NowPlayingSheet {
@@ -497,10 +472,6 @@ impl EventListener for NowPlayingSheet {
             | AppEvent::BrowserEvent(BrowserEvent::PlaylistDetailsLoaded(_))
             | AppEvent::BrowserEvent(BrowserEvent::ArtistDetailsUpdated(_)) => {
                 self.update_source();
-            }
-            AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_))
-            | AppEvent::PlaybackEvent(PlaybackEvent::AvailableDevicesChanged) => {
-                self.update_playing_on();
             }
             // Remote playback (on another device) changed while the sheet is open:
             // re-render the whole view from the mirrored snapshot.

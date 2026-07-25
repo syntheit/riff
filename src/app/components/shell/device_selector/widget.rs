@@ -1,7 +1,7 @@
 use crate::app::models::{ConnectDevice, ConnectDeviceKind};
 use crate::app::state::Device;
 use gdk::prelude::FromVariant;
-use gettextrs::gettext;
+use gettextrs::*;
 use gio::{Action, SimpleAction, SimpleActionGroup};
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -136,7 +136,9 @@ impl DeviceSelectorWidget {
         }
         let label = match device {
             Device::Local => gettext("This device"),
-            Device::Connect(connect) => connect.label.clone(),
+            // translators: shown in the now-playing footer; {} is the current
+            // Spotify Connect device name. The whole label opens the picker.
+            Device::Connect(connect) => gettext!("Playing on {}", connect.label.as_str()),
         };
         let icon = match device {
             Device::Local => "audio-x-generic-symbolic",

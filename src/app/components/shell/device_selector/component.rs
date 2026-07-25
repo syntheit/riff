@@ -1,4 +1,3 @@
-use std::ops::Deref;
 use std::rc::Rc;
 
 use gtk::prelude::Cast;
@@ -63,8 +62,11 @@ impl DeviceSelectorModel {
         }
     }
 
-    pub fn get_current_device(&self) -> impl Deref<Target = Device> + '_ {
-        self.app_model.map_state(|s| s.playback.current_device())
+    pub fn get_displayed_device(&self) -> Device {
+        self.app_model
+            .get_state()
+            .playback
+            .displayed_device()
     }
 
     pub fn set_current_device(&self, id: Option<String>) {
@@ -127,9 +129,10 @@ impl EventListener for DeviceSelector {
                 self.widget
                     .update_devices_list(&self.model.get_available_devices());
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_)) => {
+            AppEvent::PlaybackEvent(PlaybackEvent::SwitchedDevice(_))
+            | AppEvent::PlaybackEvent(PlaybackEvent::RemotePlaybackChanged) => {
                 self.widget
-                    .set_current_device(&self.model.get_current_device());
+                    .set_current_device(&self.model.get_displayed_device());
             }
             _ => (),
         }
