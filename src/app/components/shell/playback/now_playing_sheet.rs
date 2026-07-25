@@ -264,8 +264,8 @@ impl NowPlayingSheetModel {
     fn navigate_to_source(&self) -> bool {
         let action = {
             let state = self.state();
-            // RemotePlayback has a track but no source context. Never reuse the
-            // local queue's source while a remote track is being mirrored.
+            // A remote snapshot may carry a context URI for safe header display,
+            // but it is never a navigation target from this player sheet.
             if state.playback.is_mirroring_remote() {
                 return false;
             }
