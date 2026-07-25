@@ -211,7 +211,16 @@ impl ConnectPlayer {
 
     async fn apply_remote_state(&self, state: &ConnectPlayerState) {
         if let Some(songs) = self.get_queue_if_changed().await {
-            self.send_actions([PlaybackAction::LoadSongs(songs).into()]);
+            self.send_actions(
+                [PlaybackAction::LoadRemoteQueue(songs, state.context_uri.clone()).into()],
+            );
+        } else {
+            // Queue contents alone do not identify a playback context. Reconcile
+            // the URI on every poll so an unchanged song list cannot leave a
+            // stale local playlist name in the now-playing header.
+            self.send_actions([
+                PlaybackAction::SyncRemoteContext(state.context_uri.clone()).into(),
+            ]);
         }
 
         // `current_song_id` is `None` for podcasts / ads / local files / anything

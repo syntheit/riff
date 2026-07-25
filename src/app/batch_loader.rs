@@ -61,6 +61,16 @@ impl SongsSource {
         }
     }
 
+    /// Whether Spotify has identified the active playback context as this
+    /// source. Context-free sources must never match an absent remote context:
+    /// without a URI there is no safe identity check.
+    pub fn matches_spotify_context(&self, context_uri: Option<&str>) -> bool {
+        match (self.spotify_uri(), context_uri) {
+            (Some(source_uri), Some(context_uri)) => source_uri == context_uri,
+            _ => false,
+        }
+    }
+
     /// A human display name for a source that carries one. Playlists retain their
     /// actual title; Liked Songs and Radio use their intrinsic names. Album and
     /// artist names come from the currently playing track.

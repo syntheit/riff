@@ -17,7 +17,7 @@ template $NowPlayingFullWidget : Adw.Bin {
 
       // The playback-source name. It is hidden only when no actual source name
       // is available and never repeats a generic type such as "ALBUM" above the
-      // actual name. Remote-mirrored album names are intentionally not links.
+      // actual name. Remote-mirrored source names are intentionally not links.
       [title]
       Button source_button {
         visible: false;
@@ -201,19 +201,21 @@ template $NowPlayingFullWidget : Adw.Bin {
         hexpand: true;
         spacing: 12;
 
-        // Hidden by default; enabled by App::make_device_selector. Its visible
-        // device text is the sole entry point to the existing picker/popover.
+        // The visible device text is the sole entry point to the existing
+        // picker/popover. It stays bottom-left; the flexible spacer keeps Queue
+        // bottom-right without creating a non-clickable duplicate label.
         $DeviceSelectorWidget device_selector {
-          visible: false;
-          hexpand: true;
           halign: start;
           focus-on-click: false;
           can-focus: false;
 
           styles [
             "flat",
-            "now-playing-device-button",
           ]
+        }
+
+        Box {
+          hexpand: true;
         }
 
         Button queue_button {

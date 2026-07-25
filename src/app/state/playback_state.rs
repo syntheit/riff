@@ -146,6 +146,37 @@ impl PlaybackState {
         self.index.grow(self.songs.len());
     }
 
+    // A direct Connect-device queue refresh carries Spotify's active context
+    // URI. Retain a source title only when that URI exactly matches the source
+    // that riff loaded; otherwise clear it so the now-playing header can fall
+    // back to the current track's album instead of presenting stale metadata.
+    fn set_remote_queue(&mut self, tracks: Vec<SongDescription>, context_uri: Option<String>) {
+        let source = self
+            .source
+            .as_ref()
+            .filter(|source| source.matches_spotify_context(context_uri.as_deref()))
+            .cloned();
+        self.clear(source).and(|s| s.append(tracks)).commit();
+        self.index.grow(self.songs.len());
+    }
+
+    // Context can change without the queue contents changing. Reconcile it on
+    // every Connect poll, but emit a display-only event: `SourceChanged` is
+    // load-coupled and would incorrectly command the remote player again.
+    fn clear_stale_remote_source(&mut self, context_uri: Option<&str>) -> bool {
+        let keep_source = self
+            .source
+            .as_ref()
+            .map(|source| source.matches_spotify_context(context_uri))
+            .unwrap_or(false);
+        if self.source.is_some() && !keep_source {
+            self.source = None;
+            true
+        } else {
+            false
+        }
+    }
+
     // Test-only helper to build up a context playlist (append tracks, grow the
     // shuffle index). Real "add to queue" goes through `queue_next`.
     #[cfg(test)]
@@ -531,6 +562,12 @@ pub enum PlaybackAction {
     Load(String),
     #[deprecated]
     LoadSongs(Vec<SongDescription>),
+    /// Queue refresh while riff directly controls a Spotify Connect device.
+    /// The context URI proves whether a previously known source is still valid.
+    LoadRemoteQueue(Vec<SongDescription>, Option<String>),
+    /// Reconcile context even when the remote queue itself has not changed.
+    /// A missing URI is unknown and therefore cannot validate local metadata.
+    SyncRemoteContext(Option<String>),
     LoadPagedSongs(SongsSource, SongBatch),
     SetVolume(f64),
     Next,
@@ -595,6 +632,9 @@ pub enum PlaybackEvent {
     VolumeSet(f64),
     TrackChanged(String),
     SourceChanged,
+    /// A direct Connect poll invalidated the stored source without loading a new
+    /// queue. This is display-only so it never triggers another remote load.
+    RemoteContextChanged,
     Preload(String),
     ShuffleChanged(bool),
     PlaylistChanged,
@@ -753,6 +793,17 @@ impl UpdatableState for PlaybackState {
                 self.set_queue(tracks);
                 vec![PlaybackEvent::PlaylistChanged, PlaybackEvent::SourceChanged]
             }
+            PlaybackAction::LoadRemoteQueue(tracks, context_uri) => {
+                self.set_remote_queue(tracks, context_uri);
+                vec![PlaybackEvent::PlaylistChanged, PlaybackEvent::SourceChanged]
+            }
+            PlaybackAction::SyncRemoteContext(context_uri) => {
+                if self.clear_stale_remote_source(context_uri.as_deref()) {
+                    vec![PlaybackEvent::RemoteContextChanged]
+                } else {
+                    vec![]
+                }
+            }
             PlaybackAction::Queue(tracks) => {
                 let uris: Vec<String> = tracks
                     .iter()
@@ -804,6 +855,7 @@ impl UpdatableState for PlaybackState {
                     (Some(a), Some(b)) => {
                         a.device.id != b.device.id
                             || a.song.id != b.song.id
+                            || a.context_uri != b.context_uri
                             || a.is_playing != b.is_playing
                             || a.progress_ms.abs_diff(b.progress_ms) > 1500
                     }
@@ -967,6 +1019,7 @@ mod tests {
                 kind: ConnectDeviceKind::Computer,
             },
             song: song(song_id),
+            context_uri: None,
             is_playing: playing,
             progress_ms: progress,
             duration_ms: 200_000,
@@ -1004,6 +1057,60 @@ mod tests {
             state.displayed_device(),
             Device::Connect(device) if device.id == "dev1" && device.label == "Desktop"
         ));
+    }
+
+    #[test]
+    fn test_remote_queue_retains_matching_playlist_source() {
+        let mut state = PlaybackState::default();
+        state.source = Some(SongsSource::Playlist {
+            id: "playlist-1".to_string(),
+            title: "Road Trip".to_string(),
+        });
+
+        state.update_with(Cow::Owned(PlaybackAction::LoadRemoteQueue(
+            vec![song("remote-song")],
+            Some("spotify:playlist:playlist-1".to_string()),
+        )));
+
+        assert!(matches!(
+            state.current_source(),
+            Some(SongsSource::Playlist { id, title })
+                if id == "playlist-1" && title == "Road Trip"
+        ));
+    }
+
+    #[test]
+    fn test_remote_context_change_clears_stale_playlist_source() {
+        let mut state = PlaybackState::default();
+        state.source = Some(SongsSource::Playlist {
+            id: "playlist-1".to_string(),
+            title: "Road Trip".to_string(),
+        });
+
+        let events = state.update_with(Cow::Owned(PlaybackAction::SyncRemoteContext(Some(
+            "spotify:playlist:another-playlist".to_string(),
+        ))));
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, PlaybackEvent::RemoteContextChanged)));
+        assert!(state.current_source().is_none());
+    }
+
+    #[test]
+    fn test_unknown_remote_context_clears_playlist_source() {
+        let mut state = PlaybackState::default();
+        state.source = Some(SongsSource::Playlist {
+            id: "playlist-1".to_string(),
+            title: "Road Trip".to_string(),
+        });
+
+        let events = state.update_with(Cow::Owned(PlaybackAction::SyncRemoteContext(None)));
+
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, PlaybackEvent::RemoteContextChanged)));
+        assert!(state.current_source().is_none());
     }
 
     #[test]

@@ -201,18 +201,34 @@ impl NowPlayingSheetModel {
         }
     }
 
-    /// Header metadata for the currently displayed playback context. The remote
-    /// snapshot intentionally has no context URI, so while it is mirrored we
-    /// show only its track's album name and disable source navigation. A local
-    /// playlist carries its name in `SongsSource` when playback starts, rather
-    /// than depending on an optional browser detail page that may not be open.
+    /// Header metadata for the currently displayed playback context. A remote
+    /// snapshot only reuses a local playlist title after its context URI exactly
+    /// matches; otherwise it shows its track's album and disables navigation. A
+    /// local playlist carries its name in `SongsSource` when playback starts,
+    /// rather than depending on an optional browser detail page that may not be
+    /// open.
     fn source_display(&self) -> Option<SourceDisplay> {
         let state = self.state();
         let playback = &state.playback;
 
         if playback.is_mirroring_remote() {
-            return playback.displayed_song().map(|song| SourceDisplay {
-                name: song.album.name,
+            let remote = playback.remote_playback()?;
+            // A remote snapshot may identify its context URI. Reuse a local
+            // playlist title only when that URI exactly proves it is the same
+            // playlist; an absent or different URI safely falls back to the
+            // remote track's album and never exposes a stale navigation target.
+            let name = playback
+                .current_source()
+                .filter(|source| source.matches_spotify_context(remote.context_uri.as_deref()))
+                .and_then(|source| match source {
+                    SongsSource::Playlist { title, .. } if !title.is_empty() => {
+                        Some(title.clone())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| remote.song.album.name.clone());
+            return (!name.is_empty()).then(|| SourceDisplay {
+                name,
                 navigable: false,
             });
         }
@@ -448,7 +464,8 @@ impl EventListener for NowPlayingSheet {
                 self.update_current_info();
                 self.update_source();
             }
-            AppEvent::PlaybackEvent(PlaybackEvent::SourceChanged) => {
+            AppEvent::PlaybackEvent(PlaybackEvent::SourceChanged)
+            | AppEvent::PlaybackEvent(PlaybackEvent::RemoteContextChanged) => {
                 self.update_source();
             }
             AppEvent::PlaybackEvent(PlaybackEvent::PlaybackStopped) => {

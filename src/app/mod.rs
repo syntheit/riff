@@ -1,6 +1,6 @@
 use crate::auth::TokenStore;
 use crate::settings::{RiffSettings, StateTracker};
-use crate::{api::CachedSpotifyClient, feature_flags};
+use crate::api::CachedSpotifyClient;
 use futures::channel::mpsc::UnboundedSender;
 use gtk::prelude::*;
 use libadwaita::prelude::BinExt;
@@ -158,17 +158,13 @@ impl App {
             App::make_notification(builder),
         ];
 
-        // The Spotify Connect device selector lives in the now-playing footer.
-        // It is gated behind FeatureFlag::DeviceSelector so it can ship dark; the
-        // embedded widget is always instantiated (part of the now_playing_full
-        // template) but only wired to the reducer + shown when the flag is on.
-        if feature_flags::is_enabled(feature_flags::FeatureFlag::DeviceSelector) {
-            components.push(App::make_device_selector(
-                builder,
-                Rc::clone(model),
-                dispatcher,
-            ));
-        }
+        // The Spotify Connect device selector is always available in the
+        // now-playing footer for local and remote playback.
+        components.push(App::make_device_selector(
+            builder,
+            Rc::clone(model),
+            dispatcher,
+        ));
 
         self.components.append(&mut components);
     }
@@ -182,7 +178,6 @@ impl App {
         // that same instance out and drive its picker/popover.
         let now_playing_full: NowPlayingFullWidget = builder.object("now_playing_full").unwrap();
         let widget = now_playing_full.device_selector();
-        widget.set_visible(true);
         let model = DeviceSelectorModel::new(app_model, dispatcher);
         Box::new(DeviceSelector::new(widget, model))
     }

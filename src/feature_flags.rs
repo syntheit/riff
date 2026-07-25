@@ -17,10 +17,6 @@ pub enum FeatureFlag {
     */
     CreateNewPlaylist,
     /*
-    Device selector allows switching playback between Spotify Connect devices.
-    */
-    DeviceSelector,
-    /*
     Debug CSS shows alignment and rendering debug overlays to help identify layout issues.
     Only available in debug builds.
     */
@@ -42,7 +38,6 @@ impl FeatureFlag {
     pub const ALL: &[FeatureFlag] = &[
         FeatureFlag::SelectMode,
         FeatureFlag::CreateNewPlaylist,
-        FeatureFlag::DeviceSelector,
         FeatureFlag::Normalisation,
         FeatureFlag::DebugCss,
         FeatureFlag::DebugSkeleton,
@@ -56,7 +51,6 @@ impl FeatureFlag {
         match self {
             FeatureFlag::SelectMode => "feature-select-mode",
             FeatureFlag::CreateNewPlaylist => "feature-create-new-playlist",
-            FeatureFlag::DeviceSelector => "feature-device-selector",
             FeatureFlag::Normalisation => "feature-normalisation",
             FeatureFlag::DebugCss => "feature-debug-css",
             FeatureFlag::DebugSkeleton => "feature-debug-skeleton",
@@ -67,7 +61,6 @@ impl FeatureFlag {
         match self {
             FeatureFlag::SelectMode => "Select Mode",
             FeatureFlag::CreateNewPlaylist => "Create New Playlist",
-            FeatureFlag::DeviceSelector => "Device Selector",
             FeatureFlag::Normalisation => "Audio Normalisation",
             FeatureFlag::DebugCss => "Debug CSS",
             FeatureFlag::DebugSkeleton => "Debug Skeleton",
@@ -80,9 +73,6 @@ impl FeatureFlag {
                 "Enable selection mode to select multiple songs for queuing, saving, or removing."
             }
             FeatureFlag::CreateNewPlaylist => "Enable the New Playlist button in the sidebar.",
-            FeatureFlag::DeviceSelector => {
-                "Enable the device selector in the Now Playing footer."
-            }
             FeatureFlag::Normalisation => {
                 "Show audio normalisation settings for fine-tuning loudness between tracks."
             }
@@ -116,7 +106,6 @@ mod tests {
     fn non_debug_flags_are_not_debug_only() {
         assert!(!FeatureFlag::SelectMode.is_debug_only());
         assert!(!FeatureFlag::CreateNewPlaylist.is_debug_only());
-        assert!(!FeatureFlag::DeviceSelector.is_debug_only());
         assert!(!FeatureFlag::Normalisation.is_debug_only());
     }
 }

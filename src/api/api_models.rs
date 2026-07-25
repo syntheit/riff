@@ -415,7 +415,6 @@ pub struct PlayerState {
     pub repeat_state: String,
     pub shuffle_state: bool,
     pub item: FailibleTrackItem,
-    #[allow(dead_code)] // Part of the Spotify API response but currently unused
     pub context: Option<PlayerContext>,
     // The device the session is currently attached to. `GET /me/player` includes
     // this so we can tell *which* remote device is playing (for the remote-mirror
@@ -434,6 +433,7 @@ pub struct RemotePlaybackSnapshot {
     pub device_name: String,
     pub device_kind: ConnectDeviceKind,
     pub song: SongDescription,
+    pub context_uri: Option<String>,
     pub is_playing: bool,
     pub progress_ms: u32,
     pub duration_ms: u32,
@@ -443,6 +443,7 @@ impl PlayerState {
     // Build a rich remote-playback snapshot from the raw player state, or `None`
     // when there is no device / no resolvable currently-playing track.
     pub fn into_remote_snapshot(self) -> Option<RemotePlaybackSnapshot> {
+        let context_uri = self.context.as_ref().map(|context| context.uri.clone());
         let device = self.device?;
         let item = self.item.get()?;
         // Reuse the existing TrackItem -> SongDescription conversion (single-item
@@ -462,6 +463,7 @@ impl PlayerState {
             device_name: name,
             device_kind: kind,
             song,
+            context_uri,
             is_playing: self.is_playing,
             progress_ms: self.progress_ms,
             duration_ms,
@@ -477,6 +479,7 @@ impl From<PlayerState> for ConnectPlayerState {
             repeat_state,
             shuffle_state,
             item,
+            context,
             ..
         }: PlayerState,
     ) -> Self {
@@ -493,6 +496,7 @@ impl From<PlayerState> for ConnectPlayerState {
             repeat,
             shuffle,
             current_song_id,
+            context_uri: context.map(|context| context.uri),
         }
     }
 }
@@ -506,6 +510,7 @@ impl From<RemotePlaybackSnapshot> for RemotePlayback {
                 kind: s.device_kind,
             },
             song: s.song,
+            context_uri: s.context_uri,
             is_playing: s.is_playing,
             progress_ms: s.progress_ms,
             duration_ms: s.duration_ms,

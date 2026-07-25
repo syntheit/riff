@@ -341,6 +341,9 @@ pub enum RepeatMode {
 pub struct ConnectPlayerState {
     pub is_playing: bool,
     pub current_song_id: Option<String>,
+    /// Spotify's active playback context URI, when the device reports one.
+    /// This lets the UI retain a known playlist title only after an exact match.
+    pub context_uri: Option<String>,
     pub progress_ms: u32,
     pub repeat: RepeatMode,
     pub shuffle: bool,
@@ -355,6 +358,9 @@ pub struct ConnectPlayerState {
 pub struct RemotePlayback {
     pub device: ConnectDevice,
     pub song: SongDescription,
+    /// `GET /me/player.context.uri`, if Spotify identifies the remote context.
+    /// `None` must be treated as unknown, never as a match for local metadata.
+    pub context_uri: Option<String>,
     pub is_playing: bool,
     pub progress_ms: u32,
     pub duration_ms: u32,
@@ -365,6 +371,7 @@ impl Default for ConnectPlayerState {
         Self {
             is_playing: false,
             current_song_id: None,
+            context_uri: None,
             progress_ms: 0,
             repeat: RepeatMode::None,
             shuffle: false,

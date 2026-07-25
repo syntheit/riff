@@ -89,6 +89,11 @@ impl DeviceSelector {
     pub fn new(widget: DeviceSelectorWidget, model: DeviceSelectorModel) -> Self {
         let model = Rc::new(model);
 
+        // Keep the footer text correct immediately, including when the player
+        // state already mirrors a remote device before this component receives
+        // its next event.
+        widget.set_current_device(&model.get_displayed_device());
+
         widget.connect_refresh(clone!(
             #[weak]
             model,
